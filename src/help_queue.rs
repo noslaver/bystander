@@ -240,3 +240,22 @@ where
 
 // A wait-free queue.
 pub(crate) type HelpQueue<LF, const N: usize> = WaitFreeHelpQueue<*const OperationRecordBox<LF>, N>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_threaded() {
+        const ID: usize = 0usize;
+        let queue = WaitFreeHelpQueue::<_, 1>::new();
+
+        queue.enqueue(ID, 1);
+
+        let elem = queue.peek();
+        assert_eq!(elem, Some(1));
+
+        let res = queue.try_remove_front(elem.unwrap());
+        assert!(res.is_ok());
+    }
+}
