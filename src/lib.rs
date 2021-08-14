@@ -1,3 +1,4 @@
+use crossbeam_epoch as epoch;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -209,7 +210,7 @@ impl<LF: NormalizedLockFree, const N: usize> WaitFreeSimulator<LF, N> {
                 id,
             })
         } else {
-            return Err(TooManyHandles);
+            Err(TooManyHandles)
         }
     }
 }
@@ -271,7 +272,7 @@ where
             let or = unsafe { &*orb.val.load(Ordering::SeqCst) };
             let updated_or = match &or.state {
                 OperationState::Completed(..) => {
-                    let _ = self.shared.help.try_remove_front(orb);
+                    let _ = self.shared.help.try_remove_front(orb, &epoch::pin());
                     return;
                 }
                 OperationState::PreCas => {
@@ -346,7 +347,8 @@ where
     }
 
     fn help_first(&self) {
-        if let Some(help) = self.shared.help.peek() {
+        let guard = epoch::pin();
+        if let Some(help) = self.shared.help.peek(&guard) {
             self.help_op(unsafe { &*help });
         }
     }
@@ -378,7 +380,8 @@ where
                 state: OperationState::PreCas,
             }))),
         };
-        self.shared.help.enqueue(self.id, &orb);
+        let guard = epoch::pin();
+        self.shared.help.enqueue(self.id, &orb, &guard);
         loop {
             let or = unsafe { &*orb.val.load(Ordering::SeqCst) };
             if let OperationState::Completed(t) = &or.state {
