@@ -1,5 +1,5 @@
 use crate::OperationRecordBox;
-use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
+use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 use std::sync::atomic::Ordering;
 
 struct Node<T> {
@@ -40,6 +40,27 @@ pub(crate) struct WaitFreeHelpQueue<T, const N: usize> {
     state: [Atomic<OpDesc<T>>; N],
 }
 
+impl<T, const N: usize> Drop for WaitFreeHelpQueue<T, N> {
+    fn drop(&mut self) {
+        let guard = &epoch::pin();
+        let mut head = self.head.load(Ordering::SeqCst, guard);
+        while !head.is_null() {
+            let next = unsafe { head.deref() }.next.load(Ordering::SeqCst, guard);
+            let prev_head = self.head.swap(next, Ordering::SeqCst, guard);
+            unsafe {
+                prev_head.into_owned();
+            }
+            head = self.head.load(Ordering::SeqCst, guard);
+        }
+
+        for desc_atomic in &self.state {
+            unsafe {
+                let _ = desc_atomic.clone().into_owned();
+            }
+        }
+    }
+}
+
 impl<T, const N: usize> WaitFreeHelpQueue<T, N>
 where
     T: Copy + PartialEq + Eq,
@@ -47,8 +68,9 @@ where
     pub(crate) fn new() -> Self {
         use std::convert::TryInto;
 
-        let head = Atomic::new(Node::sentinel());
-        let tail = Atomic::new(Node::sentinel());
+        let sentinel = Node::sentinel();
+        let head = Atomic::new(sentinel);
+        let tail = head.clone();
         // TODO: Once consts can depend on T, make this constant instead of going via Vec
         let state: [Atomic<OpDesc<T>>; N] = (0..N)
             .map(|_| {
