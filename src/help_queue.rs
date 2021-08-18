@@ -1,5 +1,5 @@
 use crate::OperationRecordBox;
-use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
+use crossbeam_epoch::{self as epoch, Atomic, CompareExchangeError, Guard, Owned, Shared};
 use std::sync::atomic::Ordering;
 
 struct Node<T> {
@@ -93,7 +93,7 @@ where
         // Old code used `store` here, discarding the old value saved in `state[id]`.
         // We want to reclaim that value, and drop it.
         // Though maybe somehow `store` is okay. Check with dear Jon.
-        let _old_desc = self.state[id].swap(
+        let old_desc = self.state[id].swap(
             Owned::new(OpDesc {
                 phase: Some(phase),
                 pending: true,
@@ -103,6 +103,11 @@ where
             Ordering::SeqCst,
             guard,
         );
+
+        // Safety: We swapped the descriptor, it is no longer reachable.
+        unsafe {
+            guard.defer_destroy(old_desc);
+        }
 
         self.help(phase, guard);
         self.help_finish_enq(guard);
@@ -141,6 +146,10 @@ where
                 self.help_finish_enq(guard);
                 // TODO: is this needed?
                 curr_head.next.store(Shared::null(), Ordering::SeqCst);
+                // TODO
+                unsafe {
+                    guard.defer_destroy(curr_head_ptr);
+                }
                 Ok(())
             }
             Err(_) => Err(()),
@@ -267,13 +276,25 @@ where
             node: cur_desc.node.clone(),
         });
 
-        let _ = self.state[id].compare_exchange(
+        match self.state[id].compare_exchange(
             cur_desc_ptr,
             new_desc_ptr,
             Ordering::SeqCst,
             Ordering::Relaxed,
             guard,
-        );
+        ) {
+            Ok(_) => {
+                // `new_desc_ptr` was CASed into the state array -> free `cur_desc_ptr`
+                // Safety: TODO
+                unsafe {
+                    guard.defer_destroy(cur_desc_ptr);
+                }
+            }
+            Err(CompareExchangeError { new, .. }) => {
+                // Someone else already replaced the descriptor, free `new_desc_ptr`
+                drop(new);
+            }
+        }
 
         let _ = self.tail.compare_exchange(
             last_ptr,
@@ -326,35 +347,61 @@ mod tests {
         let elem = queue.peek(guard);
         assert_eq!(elem, Some(1));
 
-        //let res = queue.try_remove_front(1);
-        //assert!(res.is_ok());
+        drop(guard);
+        let guard = &epoch::pin();
 
-        //let res = queue.try_remove_front(1);
-        //assert!(res.is_err());
+        let res = queue.try_remove_front(1, guard);
+        assert!(res.is_ok());
+
+        drop(guard);
+        let guard = &epoch::pin();
+
+        let res = queue.try_remove_front(1, guard);
+        assert!(res.is_err());
     }
 
-    //#[test]
-    //fn single_threaded_2() {
-    //    const ID: usize = 0usize;
-    //    let queue = WaitFreeHelpQueue::<_, 1>::new();
+    #[test]
+    fn single_threaded_2() {
+        const ID: usize = 0usize;
+        let queue = WaitFreeHelpQueue::<_, 1>::new();
 
-    //    queue.enqueue(ID, 1);
-    //    queue.enqueue(ID, 2);
+        let guard = &epoch::pin();
+        queue.enqueue(ID, 1, guard);
 
-    //    let elem = queue.peek();
-    //    assert_eq!(elem, Some(1));
+        drop(guard);
+        let guard = &epoch::pin();
 
-    //    // Fail to enqueue element not on top
-    //    let res = queue.try_remove_front(2);
-    //    assert!(res.is_err());
+        queue.enqueue(ID, 2, guard);
 
-    //    let res = queue.try_remove_front(1);
-    //    assert!(res.is_ok());
+        drop(guard);
+        let guard = &epoch::pin();
 
-    //    let elem = queue.peek();
-    //    assert_eq!(elem, Some(2));
+        let elem = queue.peek(guard);
+        assert_eq!(elem, Some(1));
 
-    //    let res = queue.try_remove_front(2);
-    //    assert!(res.is_ok());
-    //}
+        drop(guard);
+        let guard = &epoch::pin();
+
+        // Fail to enqueue element not on top
+        let res = queue.try_remove_front(2, guard);
+        assert!(res.is_err());
+
+        drop(guard);
+        let guard = &epoch::pin();
+
+        let res = queue.try_remove_front(1, guard);
+        assert!(res.is_ok());
+
+        drop(guard);
+        let guard = &epoch::pin();
+
+        let elem = queue.peek(guard);
+        assert_eq!(elem, Some(2));
+
+        drop(guard);
+        let guard = &epoch::pin();
+
+        let res = queue.try_remove_front(2, guard);
+        assert!(res.is_ok());
+    }
 }
