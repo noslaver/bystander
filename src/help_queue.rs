@@ -329,8 +329,10 @@ pub(crate) type HelpQueue<LF, const N: usize> = WaitFreeHelpQueue<*const Operati
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crossbeam_epoch as epoch;
+    use std::thread;
 
     #[test]
     fn single_threaded() {
@@ -403,5 +405,41 @@ mod tests {
 
         let res = queue.try_remove_front(2, guard);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn two_threads() {
+        let queue = WaitFreeHelpQueue::<_, 2>::new();
+        let mut handles = vec![];
+
+        for id in 0..2 {
+            handles.push(thread::spawn(move || {
+                let guard = &epoch::pin();
+
+                queue.enqueue(id, 1, guard);
+
+                drop(guard);
+                let guard = &epoch::pin();
+
+                let elem = queue.peek(guard);
+                assert_eq!(elem, Some(1));
+
+                drop(guard);
+                let guard = &epoch::pin();
+
+                let res = queue.try_remove_front(1, guard);
+                assert!(res.is_ok());
+
+                drop(guard);
+                let guard = &epoch::pin();
+
+                let res = queue.try_remove_front(1, guard);
+                assert!(res.is_err())
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 }
