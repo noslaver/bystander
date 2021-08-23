@@ -446,4 +446,74 @@ mod tests {
             handle.join().unwrap();
         }
     }
+
+    #[test]
+    #[ignore]
+    fn many_threads() {
+        let queue = Arc::new(WaitFreeHelpQueue::<_, 1000>::new());
+        let mut handles = vec![];
+
+        for id in 0..1000 {
+            let queue = queue.clone();
+            handles.push(thread::spawn(move || {
+                let guard = &epoch::pin();
+
+                &queue.enqueue(id, 1, guard);
+
+                drop(guard);
+                let guard = &epoch::pin();
+
+                let elem = &queue.peek(guard);
+                assert_eq!(*elem, Some(1));
+
+                drop(guard);
+                let guard = &epoch::pin();
+
+                let res = &queue.try_remove_front(1, guard);
+                assert!(res.is_ok());
+
+                drop(guard);
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn many_threads_many_actions() {
+        let queue = Arc::new(WaitFreeHelpQueue::<_, 1000>::new());
+        let mut handles = vec![];
+
+        for id in 0..1000 {
+            let queue = queue.clone();
+            handles.push(thread::spawn(move || {
+                for run in 0..100 {
+                    let guard = &epoch::pin();
+
+                    &queue.enqueue(id, run, guard);
+
+                    drop(guard);
+                    let guard = &epoch::pin();
+
+                    let elem = &queue.peek(guard);
+                    assert!(elem.is_some());
+
+                    drop(guard);
+                    let guard = &epoch::pin();
+
+                    let res = &queue.try_remove_front(run, guard);
+                    assert!(res.is_ok());
+
+                    drop(guard);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
 }
