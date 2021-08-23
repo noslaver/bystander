@@ -326,12 +326,15 @@ where
 
 // A wait-free queue.
 pub(crate) type HelpQueue<LF, const N: usize> = WaitFreeHelpQueue<*const OperationRecordBox<LF>, N>;
+unsafe impl<T, const N: usize> Sync for WaitFreeHelpQueue<T, N> {}
+unsafe impl<T, const N: usize> Send for WaitFreeHelpQueue<T, N> {}
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
     use crossbeam_epoch as epoch;
+    use std::sync::Arc;
     use std::thread;
 
     #[test]
@@ -409,31 +412,32 @@ mod tests {
 
     #[test]
     fn two_threads() {
-        let queue = WaitFreeHelpQueue::<_, 2>::new();
+        let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
         let mut handles = vec![];
 
         for id in 0..2 {
+            let queue = queue.clone();
             handles.push(thread::spawn(move || {
                 let guard = &epoch::pin();
 
-                queue.enqueue(id, 1, guard);
+                &queue.enqueue(id, 1, guard);
 
                 drop(guard);
                 let guard = &epoch::pin();
 
-                let elem = queue.peek(guard);
-                assert_eq!(elem, Some(1));
+                let elem = &queue.peek(guard);
+                assert_eq!(*elem, Some(1));
 
                 drop(guard);
                 let guard = &epoch::pin();
 
-                let res = queue.try_remove_front(1, guard);
+                let res = &queue.try_remove_front(1, guard);
                 assert!(res.is_ok());
 
                 drop(guard);
                 let guard = &epoch::pin();
 
-                let res = queue.try_remove_front(1, guard);
+                let res = &queue.try_remove_front(1, guard);
                 assert!(res.is_err())
             }));
         }
