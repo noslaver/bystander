@@ -8,5 +8,7 @@ edition = "2018"
 
 [dependencies]
 crossbeam-epoch = "0.9.3"
+loom = "0.5.0"
 
-[target.'cfg(crossbeam_loom)'.dependencies]
+[target.'cfg(crossbeam_loom)'.dependencies.crossbeam-epoch]
+features = ["loom"]

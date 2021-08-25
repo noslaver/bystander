@@ -1,6 +1,11 @@
 use crate::OperationRecordBox;
 use crossbeam_epoch::{self as epoch, Atomic, CompareExchangeError, Guard, Owned, Shared};
+
+#[cfg(not(crossbeam_loom))]
 use std::sync::atomic::Ordering;
+
+#[cfg(crossbeam_loom)]
+use loom::sync::atomic::Ordering;
 
 struct Node<T> {
     value: Option<T>,
@@ -335,130 +340,151 @@ mod tests {
     use super::*;
     use crossbeam_epoch as epoch;
     use std::sync::Arc;
+
+    #[cfg(not(crossbeam_loom))]
     use std::thread;
+
+    #[cfg(crossbeam_loom)]
+    use loom::thread;
 
     #[test]
     fn new() {
-        let _queue = WaitFreeHelpQueue::<i32, 1>::new();
+        loom::model(|| {
+            let _queue = WaitFreeHelpQueue::<i32, 1>::new();
+        });
     }
 
     #[test]
     fn enqueue() {
-        const ID: usize = 0usize;
-        let queue = WaitFreeHelpQueue::<_, 1>::new();
+        loom::model(|| {
+            const ID: usize = 0usize;
+            let queue = WaitFreeHelpQueue::<_, 1>::new();
 
-        let guard = &epoch::pin();
+            let guard = &epoch::pin();
 
-        queue.enqueue(ID, 1, guard);
-        drop(guard);
+            queue.enqueue(ID, 1, guard);
+            drop(guard);
 
-        let guard = &epoch::pin();
+            let guard = &epoch::pin();
 
-        let elem = queue.peek(guard);
-        assert_eq!(elem, Some(1));
+            let elem = queue.peek(guard);
+            assert_eq!(elem, Some(1));
+        });
     }
 
     #[test]
     fn peek_empty() {
-        let queue = WaitFreeHelpQueue::<i32, 1>::new();
+        loom::model(|| {
+            let queue = WaitFreeHelpQueue::<i32, 1>::new();
 
-        let guard = &epoch::pin();
-        let elem = queue.peek(guard);
-        assert!(elem.is_none());
+            let guard = &epoch::pin();
+            let elem = queue.peek(guard);
+            assert!(elem.is_none());
+        });
     }
 
     #[test]
     fn remove_empty() {
-        let queue = WaitFreeHelpQueue::<i32, 1>::new();
+        loom::model(|| {
+            let queue = WaitFreeHelpQueue::<i32, 1>::new();
 
-        let guard = &epoch::pin();
-        let res = queue.try_remove_front(1, guard);
-        assert!(res.is_err());
+            let guard = &epoch::pin();
+            let res = queue.try_remove_front(1, guard);
+            assert!(res.is_err());
+        });
     }
 
     #[test]
     fn remove_wrong_front() {
-        const ID: usize = 0usize;
-        let queue = WaitFreeHelpQueue::<_, 1>::new();
+        loom::model(|| {
+            const ID: usize = 0usize;
+            let queue = WaitFreeHelpQueue::<_, 1>::new();
 
-        let guard = &epoch::pin();
+            let guard = &epoch::pin();
 
-        queue.enqueue(ID, 1, guard);
-        drop(guard);
+            queue.enqueue(ID, 1, guard);
+            drop(guard);
 
-        let guard = &epoch::pin();
+            let guard = &epoch::pin();
 
-        let elem = queue.peek(guard);
-        assert_eq!(elem, Some(1));
+            let elem = queue.peek(guard);
+            assert_eq!(elem, Some(1));
 
-        let res = queue.try_remove_front(2, guard);
-        assert!(res.is_err());
+            let res = queue.try_remove_front(2, guard);
+            assert!(res.is_err());
+        });
     }
 
     #[test]
     fn insert_get_remove() {
-        const ID: usize = 0usize;
-        let queue = WaitFreeHelpQueue::<_, 1>::new();
+        loom::model(|| {
+            const ID: usize = 0usize;
+            let queue = WaitFreeHelpQueue::<_, 1>::new();
 
-        let guard = &epoch::pin();
+            let guard = &epoch::pin();
 
-        queue.enqueue(ID, 1, guard);
+            queue.enqueue(ID, 1, guard);
 
-        drop(guard);
-        let guard = &epoch::pin();
+            drop(guard);
+            let guard = &epoch::pin();
 
-        let elem = queue.peek(guard);
-        assert_eq!(elem, Some(1));
+            let elem = queue.peek(guard);
+            assert_eq!(elem, Some(1));
 
-        drop(guard);
-        let guard = &epoch::pin();
+            drop(guard);
+            let guard = &epoch::pin();
 
-        let res = queue.try_remove_front(1, guard);
-        assert!(res.is_ok());
+            let res = queue.try_remove_front(1, guard);
+            assert!(res.is_ok());
 
-        drop(guard);
+            drop(guard);
+        });
     }
 
     #[test]
     fn insert_two_remove_both() {
-        const ID: usize = 0usize;
-        let queue = WaitFreeHelpQueue::<_, 1>::new();
+        loom::model(|| {
+            const ID: usize = 0usize;
+            let queue = WaitFreeHelpQueue::<_, 1>::new();
 
-        let guard = &epoch::pin();
-        queue.enqueue(ID, 1, guard);
+            let guard = &epoch::pin();
+            queue.enqueue(ID, 1, guard);
 
-        drop(guard);
-        let guard = &epoch::pin();
+            drop(guard);
+            let guard = &epoch::pin();
 
-        queue.enqueue(ID, 2, guard);
+            queue.enqueue(ID, 2, guard);
 
-        drop(guard);
-        let guard = &epoch::pin();
+            drop(guard);
+            let guard = &epoch::pin();
 
-        let elem = queue.peek(guard);
-        assert_eq!(elem, Some(1));
+            let elem = queue.peek(guard);
+            assert_eq!(elem, Some(1));
 
-        drop(guard);
-        let guard = &epoch::pin();
+            drop(guard);
+            let guard = &epoch::pin();
 
-        let res = queue.try_remove_front(1, guard);
-        assert!(res.is_ok());
+            let res = queue.try_remove_front(1, guard);
+            assert!(res.is_ok());
 
-        drop(guard);
-        let guard = &epoch::pin();
+            drop(guard);
+            let guard = &epoch::pin();
 
-        let elem = queue.peek(guard);
-        assert_eq!(elem, Some(2));
+            let elem = queue.peek(guard);
+            assert_eq!(elem, Some(2));
 
-        drop(guard);
-        let guard = &epoch::pin();
+            drop(guard);
+            let guard = &epoch::pin();
 
-        let res = queue.try_remove_front(2, guard);
-        assert!(res.is_ok());
+            let res = queue.try_remove_front(2, guard);
+            assert!(res.is_ok());
+        });
     }
 
     #[test]
+    #[ignore]
     fn two_threads() {
+        // loom::model(|| {
         let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
         let mut handles = vec![];
 
@@ -492,41 +518,49 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
+        // });
     }
 
     #[test]
     fn concurrent_enqueue() {
-        let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
-        let mut handles = vec![];
+        loom::model(|| {
+            let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
+            let mut handles = vec![];
 
-        for id in 0..2 {
-            let queue = queue.clone();
-            handles.push(thread::spawn(move || {
-                for _ in 0..10000 {
-                    let guard = &epoch::pin();
+            for id in 0..2 {
+                let queue = queue.clone();
+                handles.push(thread::spawn(move || {
+                    for i in 0..10000 {
+                        if i % 100 == 0 {
+                            loom::thread::yield_now();
+                        }
 
-                    &queue.enqueue(id, id, guard);
+                        let guard = &epoch::pin();
 
-                    drop(guard);
-                }
-            }));
-        }
+                        &queue.enqueue(id, id, guard);
 
-        for handle in handles {
-            handle.join().unwrap();
-        }
+                        drop(guard);
+                    }
+                }));
+            }
 
-        for _ in 0..20000 {
-            let guard = &epoch::pin();
+            for handle in handles {
+                handle.join().unwrap();
+            }
 
-            let elem = &queue.peek(guard);
-            assert!(*elem == Some(0) || *elem == Some(1));
+            for _ in 0..20000 {
+                let guard = &epoch::pin();
 
-            drop(guard);
-        }
+                let elem = &queue.peek(guard);
+                assert!(*elem == Some(0) || *elem == Some(1));
+
+                drop(guard);
+            }
+        });
     }
 
     #[test]
+    #[ignore]
     fn concurrent_remove() {
         let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
 
