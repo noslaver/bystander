@@ -1,4 +1,3 @@
-use crate::OperationRecordBox;
 use crossbeam_epoch::{self as epoch, Atomic, CompareExchangeError, Guard, Owned, Shared};
 use std::sync::atomic::Ordering;
 
@@ -323,9 +322,6 @@ where
         state.pending && state.phase.unwrap_or(0) <= phase
     }
 }
-
-// A wait-free queue.
-pub(crate) type HelpQueue<LF, const N: usize> = WaitFreeHelpQueue<*const OperationRecordBox<LF>, N>;
 
 #[cfg(test)]
 mod tests {
