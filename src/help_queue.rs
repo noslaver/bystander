@@ -1,4 +1,3 @@
-use crate::OperationRecordBox;
 use crossbeam_epoch::{self as epoch, Atomic, CompareExchangeError, Guard, Owned, Shared};
 use std::sync::atomic::Ordering;
 
@@ -113,14 +112,19 @@ where
         self.help_finish_enq(guard);
     }
 
-    pub(crate) fn peek<'g>(&self, guard: &'g Guard) -> Option<T> {
+    pub(crate) fn peek<'g>(&self, guard: &'g Guard) -> Option<&'g T> {
         // Safety: head always points to valid memory.
         let node = unsafe { self.head.load(Ordering::SeqCst, guard).deref() };
         let next = node.next.load(Ordering::SeqCst, guard);
         if next.is_null() {
             None
         } else {
-            Some(unsafe { next.deref() }.value.expect("not a sentinel Node"))
+            Some(
+                unsafe { next.deref() }
+                    .value
+                    .as_ref()
+                    .expect("not a sentinel Node"),
+            )
         }
     }
 
@@ -324,9 +328,6 @@ where
     }
 }
 
-// A wait-free queue.
-pub(crate) type HelpQueue<LF, const N: usize> = WaitFreeHelpQueue<*const OperationRecordBox<LF>, N>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,7 +346,7 @@ mod tests {
         let guard = &epoch::pin();
 
         let elem = queue.peek(guard);
-        assert_eq!(elem, Some(1));
+        assert_eq!(elem, Some(&1));
 
         drop(guard);
         let guard = &epoch::pin();
@@ -377,7 +378,7 @@ mod tests {
         let guard = &epoch::pin();
 
         let elem = queue.peek(guard);
-        assert_eq!(elem, Some(1));
+        assert_eq!(elem, Some(&1));
 
         drop(guard);
         let guard = &epoch::pin();
@@ -396,7 +397,7 @@ mod tests {
         let guard = &epoch::pin();
 
         let elem = queue.peek(guard);
-        assert_eq!(elem, Some(2));
+        assert_eq!(elem, Some(&2));
 
         drop(guard);
         let guard = &epoch::pin();
