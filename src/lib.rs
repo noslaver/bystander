@@ -2,7 +2,7 @@ mod help_queue;
 use help_queue::WaitFreeHelpQueue;
 
 use crossbeam_epoch::{
-    Atomic as EpochAtomic, CompareExchangeError, Guard, Owned, Shared as EpochShared,
+    self as epoch, Atomic as EpochAtomic, CompareExchangeError, Guard, Owned, Shared as EpochShared,
 };
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -209,10 +209,15 @@ struct Shared<LF: NormalizedLockFree, const N: usize> {
 
 pub struct WaitFreeSimulator<LF: NormalizedLockFree, const N: usize> {
     shared: Arc<Shared<LF, N>>,
+    guard: Guard,
     id: usize,
 }
 
-pub struct TooManyHandles;
+pub enum ForkError {
+    TooManyHandles,
+    ThreadReused,
+}
+
 impl<LF: NormalizedLockFree, const N: usize> WaitFreeSimulator<LF, N> {
     pub fn new(algorithm: LF) -> Self {
         assert_ne!(N, 0);
@@ -224,17 +229,23 @@ impl<LF: NormalizedLockFree, const N: usize> WaitFreeSimulator<LF, N> {
                 free_ids: Mutex::new((1..N).collect()),
             }),
             id: 0,
+            guard: epoch::pin(),
         }
     }
 
-    pub fn fork(&self) -> Result<Self, TooManyHandles> {
+    pub fn fork(&self) -> Result<Self, ForkError> {
+        if epoch::is_pinned() {
+            return Err(ForkError::ThreadReused);
+        }
+
         if let Some(id) = self.shared.free_ids.lock().unwrap().pop() {
             Ok(Self {
                 shared: Arc::clone(&self.shared),
+                guard: epoch::pin(),
                 id,
             })
         } else {
-            Err(TooManyHandles)
+            Err(ForkError::TooManyHandles)
         }
     }
 }
@@ -379,16 +390,17 @@ where
         if let Some(help) = self.shared.help.peek(&guard) {
             // Safety: The operation still exists in the queue, which means it hasn't been
             // completed yet, and thereby wasn't dropped.
-            // TODO - is it though??
-            let help = unsafe { &*help };
+            let help = unsafe { &**help };
             self.help_op(help, guard);
         }
     }
 
-    pub fn run<'g>(&self, op: LF::Input, guard: &'g Guard) -> LF::Output {
-        let help = /* once in a while */ true;
+    pub fn run<'g>(&mut self, op: LF::Input) -> LF::Output {
+        self.guard.repin();
+
+        let help = /* TODO - once in a while */ true;
         if help {
-            self.help_first(guard);
+            self.help_first(&self.guard);
         }
 
         // fast path
