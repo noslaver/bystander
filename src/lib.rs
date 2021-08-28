@@ -1,5 +1,10 @@
-use crossbeam_epoch as epoch;
-use std::sync::atomic::{AtomicPtr, Ordering};
+mod help_queue;
+use help_queue::WaitFreeHelpQueue;
+
+use crossbeam_epoch::{
+    Atomic as EpochAtomic, CompareExchangeError, Guard, Owned, Shared as EpochShared,
+};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 const CONTENTION_THRESHOLD: usize = 2;
@@ -38,7 +43,7 @@ struct CasByRcu<T> {
     value: T,
 }
 
-pub struct Atomic<T>(AtomicPtr<CasByRcu<T>>);
+pub struct Atomic<T>(EpochAtomic<CasByRcu<T>>);
 
 pub trait VersionedCas {
     fn execute(&self, contention: &mut ContentionMeasure) -> Result<bool, Contention>;
@@ -53,50 +58,54 @@ where
     T: PartialEq + Eq,
 {
     pub fn new(initial: T) -> Self {
-        Self(AtomicPtr::new(Box::into_raw(Box::new(CasByRcu {
+        Self(EpochAtomic::new(CasByRcu {
             version: 0,
             value: initial,
-        }))))
+        }))
     }
 
-    fn get(&self) -> *mut CasByRcu<T> {
-        self.0.load(Ordering::SeqCst)
+    fn get<'g>(&self, guard: &'g Guard) -> EpochShared<'g, CasByRcu<T>> {
+        self.0.load(Ordering::SeqCst, guard)
     }
 
-    pub fn with<F, R>(&self, f: F) -> R
+    pub fn with<'g, F, R>(&self, f: F, guard: &'g Guard) -> R
     where
         F: FnOnce(&T, u64) -> R,
     {
-        // Safety: this is safe because we never deallocate.
-        let this = unsafe { &*self.get() };
+        // Safety: We always point to a valid memory.
+        let this = unsafe { self.get(guard).deref() };
         f(&this.value, this.version)
     }
 
-    pub fn set(&self, value: T) {
-        let this_ptr = self.get();
-        // Safety: this is safe because we never deallocate.
-        let this = unsafe { &*this_ptr };
+    pub fn set<'g>(&self, value: T, guard: &'g Guard) {
+        let this_ptr = self.get(guard);
+        // Safety: We always point to a valid memory.
+        let this = unsafe { this_ptr.deref() };
         if this.value != value {
             self.0.store(
-                Box::into_raw(Box::new(CasByRcu {
+                Owned::new(CasByRcu {
                     version: this.version + 1,
                     value,
-                })),
+                }),
                 Ordering::SeqCst,
             );
+
+            // Safety: we replaced `this_ptr` with a new value, can no longer be reached.
+            unsafe { guard.defer_destroy(this_ptr) };
         }
     }
 
-    pub fn compare_and_set(
+    pub fn compare_and_set<'g>(
         &self,
         expected: &T,
         value: T,
         contention: &mut ContentionMeasure,
         version: Option<u64>,
+        guard: &'g Guard,
     ) -> Result<bool, Contention> {
-        let this_ptr = self.get();
-        // Safety: this is safe because we never deallocate.
-        let this = unsafe { &*this_ptr };
+        let this_ptr = self.get(guard);
+        // Safety: We always point to a valid memory.
+        let this = unsafe { this_ptr.deref() };
         if &this.value == expected {
             if let Some(v) = version {
                 if v != this.version {
@@ -108,20 +117,26 @@ where
             if expected == &value {
                 Ok(true)
             } else {
-                let new_ptr = Box::into_raw(Box::new(CasByRcu {
+                let new_ptr = Owned::new(CasByRcu {
                     version: this.version + 1,
                     value,
-                }));
+                });
                 match self.0.compare_exchange(
                     this_ptr,
                     new_ptr,
                     Ordering::SeqCst,
                     Ordering::Relaxed,
+                    guard,
                 ) {
-                    Ok(_) => Ok(true),
-                    Err(_current) => {
-                        // Safety: the Box was never shared.
-                        let _ = unsafe { Box::from_raw(new_ptr) };
+                    Ok(_) => {
+                        // Safety: `this_ptr` was CASed and can no longer be read.
+                        unsafe { guard.defer_destroy(this_ptr) };
+
+                        Ok(true)
+                    }
+                    Err(CompareExchangeError { new, .. }) => {
+                        // Safety: new was never shared.
+                        drop(new);
                         contention.detected()?;
                         Ok(false)
                     }
@@ -158,7 +173,7 @@ pub trait NormalizedLockFree {
 }
 
 struct OperationRecordBox<LF: NormalizedLockFree> {
-    val: AtomicPtr<OperationRecord<LF>>,
+    val: EpochAtomic<OperationRecord<LF>>,
 }
 
 enum OperationState<LF: NormalizedLockFree> {
@@ -174,8 +189,17 @@ struct OperationRecord<LF: NormalizedLockFree> {
     state: OperationState<LF>,
 }
 
-mod help_queue;
-use help_queue::HelpQueue;
+impl<LF: NormalizedLockFree> OperationRecord<LF> {
+    fn new(input: LF::Input) -> Self {
+        Self {
+            owner: std::thread::current().id(),
+            input,
+            state: OperationState::PreCas,
+        }
+    }
+}
+
+type HelpQueue<LF, const N: usize> = WaitFreeHelpQueue<*const OperationRecordBox<LF>, N>;
 
 struct Shared<LF: NormalizedLockFree, const N: usize> {
     algorithm: LF,
@@ -267,12 +291,14 @@ where
     }
 
     // Guarantees that on return, orb is no longer in help queue.
-    fn help_op(&self, orb: &OperationRecordBox<LF>) {
+    fn help_op<'g>(&self, orb: &OperationRecordBox<LF>, guard: &'g Guard) {
         loop {
-            let or = unsafe { &*orb.val.load(Ordering::SeqCst) };
+            let or_ptr = orb.val.load(Ordering::SeqCst, guard);
+            // Safety: An `OperationRecordBox` is always initialized with valid memory.
+            let or = unsafe { or_ptr.deref() };
             let updated_or = match &or.state {
                 OperationState::Completed(..) => {
-                    let _ = self.shared.help.try_remove_front(orb, &epoch::pin());
+                    let _ = self.shared.help.try_remove_front(orb, guard);
                     return;
                 }
                 OperationState::PreCas => {
@@ -284,11 +310,11 @@ where
                         Ok(cas_list) => cas_list,
                         Err(Contention) => continue,
                     };
-                    Box::new(OperationRecord {
+                    OperationRecord {
                         owner: or.owner.clone(),
                         input: or.input.clone(),
                         state: OperationState::ExecuteCas(cas_list),
-                    })
+                    }
                 }
                 OperationState::ExecuteCas(cas_list) => {
                     let outcome = match self.cas_execute(cas_list, &mut ContentionMeasure(0)) {
@@ -296,11 +322,11 @@ where
                         Err(CasExecuteFailure::CasFailed(i)) => Err(i),
                         Err(CasExecuteFailure::Contention) => continue,
                     };
-                    Box::new(OperationRecord {
+                    OperationRecord {
                         owner: or.owner.clone(),
                         input: or.input.clone(),
                         state: OperationState::PostCas(cas_list.clone(), outcome),
-                    })
+                    }
                 }
                 OperationState::PostCas(cas_list, outcome) => {
                     match self.shared.algorithm.wrap_up(
@@ -308,18 +334,18 @@ where
                         cas_list,
                         &mut ContentionMeasure(0),
                     ) {
-                        Ok(Some(result)) => Box::new(OperationRecord {
+                        Ok(Some(result)) => OperationRecord {
                             owner: or.owner.clone(),
                             input: or.input.clone(),
                             state: OperationState::Completed(result),
-                        }),
+                        },
                         Ok(None) => {
                             // We need to re-start from the generator.
-                            Box::new(OperationRecord {
+                            OperationRecord {
                                 owner: or.owner.clone(),
                                 input: or.input.clone(),
                                 state: OperationState::PreCas,
-                            })
+                            }
                         }
                         Err(Contention) => {
                             // Not up to us to re-start.
@@ -328,35 +354,41 @@ where
                     }
                 }
             };
-            let updated_or = Box::into_raw(updated_or);
+            let updated_or = Owned::new(updated_or);
 
-            if orb
-                .val
-                .compare_exchange_weak(
-                    or as *const OperationRecord<_> as *mut OperationRecord<_>,
-                    updated_or,
-                    Ordering::SeqCst,
-                    Ordering::Relaxed,
-                )
-                .is_err()
-            {
-                // Never got shared, so safe to drop.
-                let _ = unsafe { Box::from_raw(updated_or) };
+            match orb.val.compare_exchange_weak(
+                or_ptr,
+                updated_or,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+                guard,
+            ) {
+                Ok(_) => {
+                    // Safety: `or_ptr` was CASed and can no longer be read.
+                    unsafe { guard.defer_destroy(or_ptr) };
+                }
+                Err(CompareExchangeError { new, .. }) => {
+                    // Never got shared, so safe to drop.
+                    drop(new);
+                }
             }
         }
     }
 
-    fn help_first(&self) {
-        let guard = epoch::pin();
+    fn help_first<'g>(&self, guard: &'g Guard) {
         if let Some(help) = self.shared.help.peek(&guard) {
-            self.help_op(unsafe { &*help });
+            // Safety: The operation still exists in the queue, which means it hasn't been
+            // completed yet, and thereby wasn't dropped.
+            // TODO - is it though??
+            let help = unsafe { &**help };
+            self.help_op(help, guard);
         }
     }
 
-    pub fn run(&self, op: LF::Input) -> LF::Output {
+    pub fn run<'g>(&self, op: LF::Input, guard: &'g Guard) -> LF::Output {
         let help = /* once in a while */ true;
         if help {
-            self.help_first();
+            self.help_first(guard);
         }
 
         // fast path
@@ -374,20 +406,21 @@ where
 
         // slow path: ask for help.
         let orb = OperationRecordBox {
-            val: AtomicPtr::new(Box::into_raw(Box::new(OperationRecord {
-                owner: std::thread::current().id(),
-                input: op,
-                state: OperationState::PreCas,
-            }))),
+            val: EpochAtomic::new(OperationRecord::new(op)),
         };
-        let guard = epoch::pin();
-        self.shared.help.enqueue(self.id, &orb, &guard);
+        self.shared.help.enqueue(self.id, &orb, guard);
         loop {
-            let or = unsafe { &*orb.val.load(Ordering::SeqCst) };
+            // Safety: orb.val points to valid memory, and we break after we destroy him.
+            let or_ptr = orb.val.load(Ordering::SeqCst, guard);
+            let or = unsafe { or_ptr.deref() };
             if let OperationState::Completed(t) = &or.state {
+                // Safety: When the operation is completed, it is removed from the queue and can no
+                // longer be accessed by other threads.
+                unsafe { guard.defer_destroy(or_ptr) };
+
                 break t.clone();
             } else {
-                self.help_first();
+                self.help_first(guard);
             }
         }
     }
