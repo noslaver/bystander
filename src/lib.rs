@@ -64,6 +64,10 @@ where
         }))
     }
 
+    pub fn null() -> Self {
+        Self(EpochAtomic::null())
+    }
+
     fn get<'g>(&self, guard: &'g Guard) -> EpochShared<'g, CasByRcu<T>> {
         self.0.load(Ordering::SeqCst, guard)
     }
@@ -72,6 +76,7 @@ where
     where
         F: FnOnce(&T, u64) -> R,
     {
+        // TODO
         // Safety: We always point to a valid memory.
         let this = unsafe { self.get(guard).deref() };
         f(&this.value, this.version)
@@ -380,7 +385,7 @@ where
             // Safety: The operation still exists in the queue, which means it hasn't been
             // completed yet, and thereby wasn't dropped.
             // TODO - is it though??
-            let help = unsafe { &*help };
+            let help = unsafe { &**help };
             self.help_op(help, guard);
         }
     }
