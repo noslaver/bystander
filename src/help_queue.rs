@@ -458,43 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn two_threads() {
-        let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
-        let mut handles = vec![];
-
-        for id in 0..2 {
-            let queue = queue.clone();
-            handles.push(thread::spawn(move || {
-                let guard = &epoch::pin();
-
-                &queue.enqueue(id, 1, guard);
-
-                drop(guard);
-                let guard = &epoch::pin();
-
-                let elem = &queue.peek(guard);
-                assert_eq!(*elem, Some(1));
-
-                drop(guard);
-                let guard = &epoch::pin();
-
-                let res = &queue.try_remove_front(1, guard);
-                assert!(res.is_ok());
-
-                drop(guard);
-                let guard = &epoch::pin();
-
-                let res = &queue.try_remove_front(1, guard);
-                assert!(res.is_err())
-            }));
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-    }
-
-    #[test]
     fn concurrent_enqueue() {
         let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
         let mut handles = vec![];
