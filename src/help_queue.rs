@@ -328,7 +328,6 @@ where
     }
 }
 
-// A wait-free queue.
 unsafe impl<T, const N: usize> Sync for WaitFreeHelpQueue<T, N> {}
 unsafe impl<T, const N: usize> Send for WaitFreeHelpQueue<T, N> {}
 
