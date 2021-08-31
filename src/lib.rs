@@ -380,7 +380,7 @@ where
             // Safety: The operation still exists in the queue, which means it hasn't been
             // completed yet, and thereby wasn't dropped.
             // TODO - is it though??
-            let help = unsafe { &*help };
+            let help = unsafe { &**help };
             self.help_op(help, guard);
         }
     }
