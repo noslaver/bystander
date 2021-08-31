@@ -162,18 +162,22 @@ pub trait NormalizedLockFree {
         &self,
         op: &Self::Input,
         contention: &mut ContentionMeasure,
+        guard: &Guard,
     ) -> Result<Self::CommitDescriptor, Contention>;
     fn wrap_up(
         &self,
+        op: &Self::Input,
         executed: Result<(), usize>,
         performed: &Self::CommitDescriptor,
         contention: &mut ContentionMeasure,
+        guard: &Guard,
     ) -> Result<Option<Self::Output>, Contention>;
 
     fn fast_path(
         &self,
         op: &Self::Input,
         contention: &mut ContentionMeasure,
+        guard: &Guard,
     ) -> Result<Self::Output, Contention>;
 }
 
@@ -307,11 +311,11 @@ where
                     return;
                 }
                 OperationState::PreCas => {
-                    let cas_list = match self
-                        .shared
-                        .algorithm
-                        .generator(&or.input, &mut ContentionMeasure(0))
-                    {
+                    let cas_list = match self.shared.algorithm.generator(
+                        &or.input,
+                        &mut ContentionMeasure(0),
+                        guard,
+                    ) {
                         Ok(cas_list) => cas_list,
                         Err(Contention) => continue,
                     };
@@ -335,9 +339,11 @@ where
                 }
                 OperationState::PostCas(cas_list, outcome) => {
                     match self.shared.algorithm.wrap_up(
+                        &or.input,
                         *outcome,
                         cas_list,
                         &mut ContentionMeasure(0),
+                        guard,
                     ) {
                         Ok(Some(result)) => OperationRecord {
                             owner: or.owner.clone(),
@@ -399,7 +405,7 @@ where
         // fast path
         for retry in 0.. {
             let mut contention = ContentionMeasure(0);
-            match self.shared.algorithm.fast_path(&op, &mut contention) {
+            match self.shared.algorithm.fast_path(&op, &mut contention, guard) {
                 Ok(result) => return result,
                 Err(Contention) => {}
             }

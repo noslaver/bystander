@@ -1,4 +1,4 @@
-use bystander::Atomic;
+use bystander::{Atomic, ContentionMeasure};
 use crossbeam_epoch::Guard;
 use std::sync::atomic::Ordering;
 
@@ -54,7 +54,12 @@ where
         Self { head, tail }
     }
 
-    pub fn insert<'g>(&self, key: T, guard: &'g Guard) -> bool {
+    pub fn insert<'g>(
+        &self,
+        key: T,
+        contention: &mut ContentionMeasure,
+        guard: &'g Guard,
+    ) -> Result<bool, Contention> {
         // It is guaranteed that on returning, either the key is in the list
         loop {
             // Find nodes that will be before and after the new key
@@ -64,13 +69,14 @@ where
 
             // Key already in list
             if right_ptr != self.tail.load(Ordering::SeqCst, guard) && right.key == Some(key) {
-                return false;
+                return Ok(false);
             }
 
             let mut new = Node::new(key);
             new.next = Atomic::<Node<T>>::from(right_ptr);
             let new_ptr = Owned::new(new);
-            if left
+            // TODO - change to atomic (?) and return proper values
+            match left
                 .next
                 .compare_exchange(
                     right_ptr,
@@ -78,15 +84,15 @@ where
                     Ordering::SeqCst,
                     Ordering::Relaxed,
                     guard,
-                )
-                .is_ok()
-            {
-                return true;
+                ) {
+                Ok(true) => return Ok(true),
+                Err(Contention) => return Err(Contention),
             }
+        }
         }
     }
 
-    pub fn delete<'g>(&self, key: T, guard: &'g Guard) -> bool {
+    pub fn delete<'g>(&self, key: T, contention: &mut ContentionMeasure, guard: &'g Guard) -> Result<bool, Contention> {
         let mut right_ptr;
         let mut right;
         let mut right_next;
@@ -101,10 +107,12 @@ where
             left = unsafe { left_ptr.deref() };
 
             if (right_ptr == tail) || (right.key != Some(key)) {
-                return false;
+                return Ok(false);
             }
 
             right_next = right.next.load(Ordering::SeqCst, guard);
+
+            // TODO - change to atomic and return proper values
             if right_next.tag() == 0 {
                 if right
                     .next
@@ -136,18 +144,18 @@ where
             let _ = self.search(right.key, guard);
         }
 
-        true
+        Ok(true)
     }
 
-    pub fn find<'g>(&self, key: T, guard: &'g Guard) -> bool {
+    pub fn find<'g>(&self, key: T, guard: &'g Guard) -> Result<bool, _> {
         let (_, right_ptr) = self.search(Some(key), guard);
         let right = unsafe { right_ptr.deref() };
 
         let tail = self.tail.load(Ordering::SeqCst, guard);
         if (right_ptr == tail) || (right.key != Some(key)) {
-            false
+            Ok(false)
         } else {
-            true
+            Ok(true)
         }
     }
 
