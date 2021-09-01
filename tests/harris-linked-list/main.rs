@@ -27,33 +27,62 @@ struct ReferenceQuartet<T> {
     reference: &T,
     mark_bit: bool,
     help_bit: bool,
-    version: u64,
 }
 
 impl<T> ReferenceQuartet<T> {
-    fn new(reference: &T, mark_bit: bool, help_bit: bool, version: u64) -> Self {
-        Self(reference, mark_bit, help_bit, version)
+    fn new(reference: &T, mark_bit: bool, help_bit: bool) -> Self {
+        Self(reference, mark_bit, help_bit)
     }
 }
-struct VersionedDoubleMarkReference<T> {
+struct DoubleMarkReference<T> {
     atomic_ref: Atomic<ReferenceQuartet<T>>,
 }
 
-impl<T> VersionedDoubleMarkReference<T> {
+impl<T> DoubleMarkReference<T> {
     fn new(reference: &T, mark_bit: bool, help_bit: bool) -> Self {
         Self(Atomic::<ReferenceQuartet<T>>::new(
-            ReferenceQuartet::<T>::new(reference, mark_bit, help_bit, 0),
+            ReferenceQuartet::<T>::new(reference, mark_bit, help_bit),
         ))
     }
 
-    fn get_version(&self, guard: &Guard) -> u64 {
-        let rq = self.atomic_ref.get(guard);
+    fn get_version(&self) -> u64 {
+        let (_, old_version) = self
+            .atomic_ref
+            .with(|current, version| return (current, version), guard);
+        old_version
+    }
+
+    fn compare_and_set(
+        &self,
+        expected: &T,
+        new: &T,
+        expected_mark: bool,
+        new_mark: bool,
+        expected_help: bool,
+        new_help: bool,
+    ) -> bool {
+        let (current, new_version) = self
+            .atomic_ref
+            .with(|current, version| return (current, version + 1), guard);
+        expected == current.reference
+            && expected_mark == current.mark_bit
+            && expected_help == current.help_bit
+            && (new == current.reference
+                && new_mark == current.mark_bit
+                && new_help == current.help_bit
+                || self.atomic_ref.compare_and_set(
+                    current,
+                    ReferenceQuartet::new(new, new_mark, new_help),
+                    contention,
+                    new_version,
+                    guard,
+                ))
     }
 }
 
 #[derive(Clone)]
 pub struct ListCasDescriptor<T> {
-    holder: VersionedDoubleMarkReference<Node<T>>,
+    holder: DoubleMarkReference<Node<T>>,
     old_ref: &'g Node<T>,
     new_ref: &'g Node<T>,
     old_mark: bool,
@@ -64,7 +93,7 @@ pub struct ListCasDescriptor<T> {
 
 impl<T> ListCasDescriptor<T> {
     fn new(
-        holder: VersionDoubleMarkReference<Node<T>>,
+        holder: DoubleMarkReference<Node<T>>,
         old_ref: &'g Node<T>,
         new_ref: &'g Node<T>,
         old_mark: bool,
@@ -77,7 +106,7 @@ impl<T> ListCasDescriptor<T> {
             new_ref,
             old_mark,
             new_mark,
-            holder.get_version(guard),
+            holder.get_version(),
             CasState::Pending,
         )
     }
@@ -85,23 +114,41 @@ impl<T> ListCasDescriptor<T> {
 
 impl VersionedCas for ListCasDescriptor {
     fn execute(&self, _contention: &mut ContentionMeasure) -> Result<bool, Contention> {
-        self.holder.compare_and_set(self.old_ref)
+        Ok(self.holder.compare_and_set(
+            self.old_ref,
+            self.new_ref,
+            self.old_mark,
+            self.new_mark,
+            false,
+            true,
+        ))
     }
 
     fn has_modified_bit(&self) -> bool {
-        todo!()
+        let (current, new_version) = self
+            .holder
+            .atomic_ref
+            .with(|current, version| return (current, version), guard);
+        current.help_bit && self.old_version + 1 == new_version
     }
 
     fn clear_bit(&self) -> bool {
-        todo!()
+        self.holder.compare_and_set(
+            self.new_ref,
+            self.new_ref,
+            self.new_mark,
+            self.new_mark,
+            true,
+            false,
+        )
     }
 
     fn state(&self) -> CasState {
-        todo!()
+        self.state
     }
 
     fn set_state(&self, _new: CasState) {
-        todo!()
+        self.state = _new;
     }
 }
 
