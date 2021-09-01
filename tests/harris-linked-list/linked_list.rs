@@ -1,5 +1,5 @@
-use bystander::{Atomic, ContentionMeasure};
-use crossbeam_epoch::Guard;
+use bystander::{Atomic, Contention, ContentionMeasure};
+use crossbeam_epoch::{Guard, Owned, Shared};
 use std::sync::atomic::Ordering;
 
 pub(crate) struct Node<T> {
@@ -76,23 +76,25 @@ where
             new.next = Atomic::<Node<T>>::from(right_ptr);
             let new_ptr = Owned::new(new);
             // TODO - change to atomic (?) and return proper values
-            match left
-                .next
-                .compare_exchange(
-                    right_ptr,
-                    new_ptr,
-                    Ordering::SeqCst,
-                    Ordering::Relaxed,
-                    guard,
-                ) {
+            match left.next.compare_exchange(
+                right_ptr,
+                new_ptr,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+                guard,
+            ) {
                 Ok(true) => return Ok(true),
                 Err(Contention) => return Err(Contention),
             }
         }
-        }
     }
 
-    pub fn delete<'g>(&self, key: T, contention: &mut ContentionMeasure, guard: &'g Guard) -> Result<bool, Contention> {
+    pub fn delete<'g>(
+        &self,
+        key: T,
+        contention: &mut ContentionMeasure,
+        guard: &'g Guard,
+    ) -> Result<bool, Contention> {
         let mut right_ptr;
         let mut right;
         let mut right_next;
@@ -147,7 +149,8 @@ where
         Ok(true)
     }
 
-    pub fn find<'g>(&self, key: T, guard: &'g Guard) -> Result<bool, _> {
+    // TODO - use contention??
+    pub fn find<'g>(&self, key: T, guard: &'g Guard) -> Result<bool, Contention> {
         let (_, right_ptr) = self.search(Some(key), guard);
         let right = unsafe { right_ptr.deref() };
 

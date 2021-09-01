@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 const CONTENTION_THRESHOLD: usize = 2;
 const RETRY_THRESHOLD: usize = 2;
 
+#[derive(Copy, Debug, PartialEq, Eq, Clone)]
 pub struct Contention;
 
 // in bystander
@@ -158,26 +159,27 @@ pub trait NormalizedLockFree {
     type Output: Clone;
     type CommitDescriptor: Clone;
 
-    fn generator(
+    fn generator<'g>(
         &self,
         op: &Self::Input,
         contention: &mut ContentionMeasure,
-        guard: &Guard,
+        guard: &'g Guard,
     ) -> Result<Self::CommitDescriptor, Contention>;
-    fn wrap_up(
+
+    fn wrap_up<'g>(
         &self,
         op: &Self::Input,
         executed: Result<(), usize>,
         performed: &Self::CommitDescriptor,
         contention: &mut ContentionMeasure,
-        guard: &Guard,
+        guard: &'g Guard,
     ) -> Result<Option<Self::Output>, Contention>;
 
-    fn fast_path(
+    fn fast_path<'g>(
         &self,
         op: &Self::Input,
         contention: &mut ContentionMeasure,
-        guard: &Guard,
+        guard: &'g Guard,
     ) -> Result<Self::Output, Contention>;
 }
 
