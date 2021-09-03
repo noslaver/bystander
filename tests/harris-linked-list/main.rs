@@ -1,5 +1,5 @@
 use crossbeam_epoch::{self as epoch, Guard};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use bystander::{
     Atomic, CasState, Contention, ContentionMeasure, NormalizedLockFree, VersionedCas,
@@ -8,7 +8,30 @@ use bystander::{
 
 // in a consuming crate (wait-free-linked-list crate)
 pub struct WaitFreeLinkedList<const N: usize> {
-    _simulator: WaitFreeSimulator<LinkedList, N>,
+    sim: WaitFreeSimulator<LinkedList, N>,
+}
+
+impl<const N: usize> WaitFreeLinkedList<N> {
+    fn new() -> Self {
+        Self {
+            sim: WaitFreeSimulator::new(LinkedList::new()),
+        }
+    }
+
+    pub fn insert(&self, key: usize) -> bool {
+        let guard = &epoch::pin();
+        self.sim.run(InputOp::Insert(key), guard)
+    }
+
+    pub fn delete(&self, key: usize) -> bool {
+        let guard = &epoch::pin();
+        self.sim.run(InputOp::Delete(key), guard)
+    }
+
+    pub fn find(&self, key: usize) -> bool {
+        let guard = &epoch::pin();
+        self.sim.run(InputOp::Find(key), guard)
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd)]
@@ -19,34 +42,38 @@ pub enum InputOp {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct RefTriple {
-    reference: Node,
+struct DoubleMarkNode {
+    node: Node,
     mark: bool,
     help: bool,
 }
 
-impl RefTriple {
-    fn new(reference: Node, mark: bool, help: bool) -> Self {
-        Self {
-            reference,
-            mark,
-            help,
-        }
+impl DoubleMarkNode {
+    fn new(node: Node, mark: bool, help: bool) -> Self {
+        Self { node, mark, help }
+    }
+}
+
+impl std::ops::Deref for DoubleMarkNode {
+    type Target = Node;
+
+    fn deref(&self) -> &Self::Target {
+        &self.node
     }
 }
 
 #[derive(Clone, PartialEq, Eq)]
-#[repr(transparant)]
-struct DoubleMarkRef(Atomic<RefTriple>);
+// #[repr(transparent)]
+struct DoubleMarkRef(Atomic<DoubleMarkNode>);
 
 impl DoubleMarkRef {
-    fn new(reference: Node, mark: bool, help: bool) -> Self {
-        Self(Atomic::<RefTriple>::new(RefTriple::new(
-            reference, mark, help,
+    fn new(node: Node, mark: bool, help: bool) -> Self {
+        Self(Atomic::<DoubleMarkNode>::new(DoubleMarkNode::new(
+            node, mark, help,
         )))
     }
 
-    fn get_version<'g>(&self, guard: &'g Guard) -> u64 {
+    fn get_version(&self, guard: &Guard) -> u64 {
         self.0.with(|_, version| version, guard)
     }
 
@@ -65,20 +92,20 @@ impl DoubleMarkRef {
             .0
             .with(|current, version| (current, version + 1), guard);
 
-        if !(expected == &current.reference
+        if !(expected == &current.node
             && expected_mark == current.mark
             && expected_help == current.help)
         {
             return Ok(false);
         }
 
-        if new == current.reference && new_mark == current.mark && new_help == current.help {
+        if new == current.node && new_mark == current.mark && new_help == current.help {
             return Ok(true);
         }
 
         self.0.compare_and_set(
             current,
-            RefTriple::new(new, new_mark, new_help),
+            DoubleMarkNode::new(new, new_mark, new_help),
             contention,
             Some(new_version),
             guard,
@@ -86,7 +113,6 @@ impl DoubleMarkRef {
     }
 }
 
-#[derive(Clone)]
 pub struct ListCasDescriptor {
     holder: DoubleMarkRef,
     old_ref: *const Node, // TODO
@@ -94,7 +120,21 @@ pub struct ListCasDescriptor {
     old_mark: bool,
     new_mark: bool,
     old_version: u64,
-    state: CasState,
+    state: AtomicU8, // This is actually CasState
+}
+
+impl Clone for ListCasDescriptor {
+    fn clone(&self) -> Self {
+        Self {
+            holder: self.holder.clone(),
+            old_ref: self.old_ref,
+            new_ref: self.new_ref.clone(),
+            old_mark: self.old_mark,
+            new_mark: self.new_mark,
+            old_version: self.old_version,
+            state: self.state.load(Ordering::SeqCst).into(),
+        }
+    }
 }
 
 impl ListCasDescriptor {
@@ -113,18 +153,20 @@ impl ListCasDescriptor {
             old_mark,
             new_mark,
             old_version,
-            state: CasState::Pending,
+            state: AtomicU8::new(CasState::Pending as u8),
         }
     }
 }
 
 impl VersionedCas for ListCasDescriptor {
-    fn execute(&self, contention: &mut ContentionMeasure) -> Result<bool, Contention> {
-        // TODO
-        let guard = &epoch::pin();
+    fn execute(
+        &self,
+        contention: &mut ContentionMeasure,
+        guard: &Guard,
+    ) -> Result<bool, Contention> {
         self.holder.compare_and_set(
             unsafe { &*self.old_ref }, // TODO
-            self.new_ref,
+            self.new_ref.clone(),
             self.old_mark,
             self.new_mark,
             false,
@@ -134,52 +176,51 @@ impl VersionedCas for ListCasDescriptor {
         )
     }
 
-    fn has_modified_bit(&self) -> bool {
-        // TODO
-        let guard = &epoch::pin();
+    fn has_modified_bit(&self, guard: &Guard) -> bool {
         self.holder.0.with(
             |current, version| current.help && self.old_version + 1 == version,
             guard,
         )
     }
 
-    fn clear_bit(&self) -> bool {
-        // TODO
-        let guard = &epoch::pin();
-        match self.holder.compare_and_set(
-            &self.new_ref,
-            self.new_ref,
-            self.new_mark,
-            self.new_mark,
-            true,
-            false,
-            &mut ContentionMeasure::new(),
-            guard,
-        ) {
-            Ok(b) => b,
-            Err(_) => false,
-        }
+    fn clear_bit(&self, guard: &Guard) -> bool {
+        self.holder
+            .compare_and_set(
+                &self.new_ref,
+                self.new_ref.clone(),
+                self.new_mark,
+                self.new_mark,
+                true,
+                false,
+                &mut ContentionMeasure::new(),
+                guard,
+            )
+            .unwrap_or(false)
     }
 
     fn state(&self) -> CasState {
-        self.state
+        match self.state.load(Ordering::SeqCst) {
+            0 => CasState::Success,
+            1 => CasState::Failure,
+            2 => CasState::Pending,
+            _ => unreachable!(),
+        }
     }
 
     fn set_state(&self, new: CasState) {
-        self.state = new;
+        self.state.store(new as u8, Ordering::SeqCst);
     }
 }
 
 #[derive(Clone)]
 pub struct Node {
-    pub key: Option<usize>,
-    pub next: DoubleMarkRef,
+    key: Option<usize>,
+    next: DoubleMarkRef,
 }
 
 impl Eq for Node {}
 impl PartialEq for Node {
     fn eq(&self, other: &Self) -> bool {
-        let guard = &epoch::pin();
         self.key == other.key && self.next == other.next
     }
 }
@@ -201,8 +242,8 @@ impl Node {
 }
 
 pub struct LinkedList {
-    pub head: DoubleMarkRef,
-    pub tail: DoubleMarkRef,
+    head: DoubleMarkRef,
+    tail: DoubleMarkRef,
 }
 
 impl LinkedList {
@@ -214,112 +255,104 @@ impl LinkedList {
         Self { head, tail }
     }
 
-    pub fn insert<'g>(&self, key: usize, guard: &'g Guard) -> bool {
+    pub fn insert(&self, key: usize, guard: &Guard) -> bool {
         match self.insert_impl(key, &mut ContentionMeasure::new(), guard) {
             Ok(b) => b,
             Err(Contention) => false,
         }
     }
 
-    fn insert_impl<'g>(
+    fn insert_impl(
         &self,
         key: usize,
         contention: &mut ContentionMeasure,
-        guard: &'g Guard,
+        guard: &Guard,
     ) -> Result<bool, Contention> {
         loop {
             // Find nodes that will be before and after the new key
             let (pred, curr) = self.search(Some(key), guard)?;
 
             // Key already in list
-            if curr != self.tail.0.with(|tail, _| &tail.reference, guard) && curr.key == Some(key) {
+            if self.tail.0.with(|tail, _| curr.node != tail.node, guard) && curr.key == Some(key) {
                 return Ok(false);
             }
 
             let mut new = Node::new(key);
-            // new.next = DoubleMarkRef::new(curr, false, false);
-            // TODO - change to atomic (?) and return proper values
+            new.next = DoubleMarkRef(unsafe { Atomic::from_raw(curr as *const _) });
 
-            match left.next.compare_and_set(
-                &right, new, contention, None, // TODO - version?
-                guard,
-            ) {
+            match pred
+                .next
+                .compare_and_set(curr, new, false, false, false, false, contention, guard)
+            {
                 Ok(true) => break Ok(true),
+                Ok(false) => continue,
                 Err(Contention) => break Err(Contention),
             }
         }
     }
 
-    pub fn delete<'g>(
+    pub fn delete(&self, key: usize, guard: &Guard) -> bool {
+        match self.delete_impl(key, &mut ContentionMeasure::new(), guard) {
+            Ok(b) => b,
+            Err(Contention) => false,
+        }
+    }
+
+    fn delete_impl(
         &self,
         key: usize,
         contention: &mut ContentionMeasure,
-        guard: &'g Guard,
+        guard: &Guard,
     ) -> Result<bool, Contention> {
-        let mut right_ptr;
-        let mut right;
-        let mut right_next;
-        let mut left;
+        'retry: loop {
+            let (pred, curr) = self.search(Some(key), guard)?;
 
-        let tail = self.tail.0.with(|tail, _| tail, guard);
-
-        loop {
-            (left, right) = self.search(Some(key), guard)?;
-            right_ptr = r_ptr;
-
-            if (right == tail) || (right.key != Some(key)) {
+            if self.tail.0.with(|tail, _| curr.node == tail.node, guard) || curr.key != Some(key) {
                 return Ok(false);
             }
 
-            right_next = right.next.load(Ordering::SeqCst, guard);
+            let succ = curr.next.0.with(|curr, _| &curr.node, guard);
 
-            // TODO - change to atomic and return proper values
-            if right_next.tag() == 0 {
-                if right
-                    .next
-                    .compare_exchange(
-                        right_next,
-                        right_next.with_tag(1),
-                        Ordering::SeqCst,
-                        Ordering::Relaxed,
-                        guard,
-                    )
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-        }
-
-        if left
-            .next
-            .compare_exchange(
-                right_ptr,
-                right_next,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
+            if curr.next.compare_and_set(
+                succ,
+                succ.clone(),
+                false,
+                true,
+                false,
+                false,
+                contention,
                 guard,
-            )
-            .is_err()
-        {
-            let _ = self.search(right.key, guard);
-        }
+            )? {
+                continue 'retry;
+            }
 
-        Ok(true)
+            // success of failure, node was deleted.
+            let _ = pred.next.compare_and_set(
+                curr,
+                succ.clone(),
+                false,
+                false,
+                false,
+                false,
+                contention,
+                guard,
+            );
+
+            return Ok(true);
+        }
     }
 
-    pub fn find<'g>(&self, key: usize, guard: &'g Guard) -> bool {
+    pub fn find(&self, key: usize, guard: &Guard) -> bool {
         match self.find_impl(key, guard) {
             Ok(b) => b,
             Err(Contention) => false,
         }
     }
 
-    fn find_impl<'g>(&self, key: usize, guard: &'g Guard) -> Result<bool, Contention> {
-        let (_, right) = self.search(Some(key), guard)?;
+    fn find_impl(&self, key: usize, guard: &Guard) -> Result<bool, Contention> {
+        let (_, curr) = self.search(Some(key), guard)?;
 
-        let tail = self.tail.0.with(|curr, _| curr.reference, guard);
-        if (right == tail) || (right.key != Some(key)) {
+        if self.tail.0.with(|tail, _| curr.node == tail.node, guard) || curr.key != Some(key) {
             Ok(false)
         } else {
             Ok(true)
@@ -330,22 +363,19 @@ impl LinkedList {
         &self,
         key: Option<usize>,
         guard: &'g Guard,
-    ) -> Result<(&'g Node, &'g Node), Contention> {
+    ) -> Result<(&'g DoubleMarkNode, &'g DoubleMarkNode), Contention> {
         let mut contention = ContentionMeasure::new();
 
         'retry: loop {
-            let mut pred = self.head.0.with(|curr, _| &curr.reference, guard);
-            let mut curr = pred.next.0.with(|curr, _| &curr.reference, guard);
+            let mut pred = self.head.0.with(|curr, _| curr, guard);
+            let mut curr = pred.node.next.0.with(|curr, _| curr, guard);
 
             loop {
-                let (mut succ, mark) = curr
-                    .next
-                    .0
-                    .with(|curr, _| (&curr.reference, curr.mark), guard);
-                while mark {
-                    let res = pred.next.compare_and_set(
-                        &curr,
-                        succ.clone(),
+                let mut succ = curr.next.0.with(|curr, _| curr, guard);
+                while succ.mark {
+                    let res = pred.node.next.compare_and_set(
+                        &curr.node,
+                        succ.node.clone(),
                         false,
                         false,
                         false,
@@ -359,10 +389,10 @@ impl LinkedList {
                     }
 
                     curr = succ;
-                    succ = curr.next.0.with(|curr, _| &curr.reference, guard);
+                    succ = curr.node.next.0.with(|curr, _| curr, guard);
                 }
 
-                if curr.key >= key {
+                if curr.node.key >= key {
                     return Ok((pred, curr));
                 }
 
@@ -384,73 +414,69 @@ impl NormalizedLockFree for LinkedList {
     fn generator<'g>(
         &self,
         op: &Self::Input,
-        _contention: &mut ContentionMeasure, // TODO
+        _contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<Self::CommitDescriptor, Contention> {
         match *op {
             InputOp::Insert(key) => {
-                let (left_ptr, right_ptr) = self.search(Some(key), guard)?;
-
-                let right = unsafe { right_ptr.deref() };
-                let left = unsafe { left_ptr.deref() };
+                let (pred, curr) = self.search(Some(key), guard)?;
 
                 // Key already in list
-                if right != self.tail.0.with(|tail, _| tail, guard) && right.key == Some(key) {
+                if self.tail.0.with(|tail, _| curr.node != tail.node, guard)
+                    && curr.key == Some(key)
+                {
                     return Ok(None);
                 }
 
                 let mut new = Node::new(key);
-                // TODO - get Atomic from Shared and then clone
-                // new.next = Atomic::<Node>::from(right_ptr);
+                new.next = DoubleMarkRef(unsafe { Atomic::from_raw(curr as *const _) });
 
-                todo!()
-                //Ok(Some(ListCasDescriptor::new(
-                //self.holder,
-                //self.old_ref,
-                //self.new_ref,
-                //self.old_mark,
-                //self.new_mark,
-                //self.holder.get_version(guard))))
+                Ok(Some(ListCasDescriptor::new(
+                    pred.next.clone(),
+                    curr as *const _ as *const _,
+                    new,
+                    false,
+                    false,
+                    pred.next.get_version(guard),
+                )))
             }
             InputOp::Delete(key) => {
-                let (left_ptr, right_ptr) = self.search(Some(key), guard)?;
+                let (_pred, curr) = self.search(Some(key), guard)?;
 
-                let right = unsafe { right_ptr.deref() };
-
-                if right == self.tail.0.with(|tail, _| tail, guard) || right.key != Some(key) {
+                if self.tail.0.with(|tail, _| tail.node == curr.node, guard)
+                    || curr.key != Some(key)
+                {
                     return Ok(None);
                 }
 
-                todo!()
-                //Ok(Some(ListCasDescriptor::new(
-                //self.holder,
-                //self.old_ref,
-                //self.new_ref,
-                //self.old_mark,
-                //self.new_mark,
-                //self.holder.get_version(guard))))
+                Ok(Some(ListCasDescriptor::new(
+                    curr.next.clone(),
+                    curr.next.0.as_raw() as *const _,
+                    curr.next.0.with(|curr, _| curr.node.clone(), guard),
+                    false,
+                    true,
+                    curr.next.get_version(guard),
+                )))
             }
-            InputOp::Find(key) => {
-                return Ok(None);
-            }
+            InputOp::Find(_key) => Ok(None),
         }
     }
 
     fn wrap_up<'g>(
         &self,
         op: &Self::Input,
-        _executed: Result<(), usize>,
+        executed: Result<(), usize>,
         performed: &Self::CommitDescriptor,
         _contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<Option<Self::Output>, Contention> {
         match *op {
-            InputOp::Delete(key) | InputOp::Insert(key) => {
+            InputOp::Delete(_key) | InputOp::Insert(_key) => {
                 if performed.is_none() {
                     // Operation failed
                     return Ok(Some(false));
                 }
-                match _executed {
+                match executed {
                     Ok(()) => Ok(Some(true)),
 
                     // Need to restart operation
@@ -474,8 +500,15 @@ impl NormalizedLockFree for LinkedList {
         // If fails return contention
         match *op {
             InputOp::Insert(key) => self.insert_impl(key, contention, guard),
-            InputOp::Delete(key) => self.delete(key, contention, guard),
+            InputOp::Delete(key) => self.delete_impl(key, contention, guard),
             InputOp::Find(key) => self.find_impl(key, guard),
         }
     }
+}
+
+#[test]
+fn nothing_works() {
+    let _linked_list = WaitFreeLinkedList::<1>::new();
+
+    // linked_list.run();
 }

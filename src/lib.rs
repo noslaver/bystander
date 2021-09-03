@@ -35,26 +35,32 @@ impl ContentionMeasure {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum CasState {
     Success,
     Failure,
     Pending,
 }
 
+#[repr(C)]
 struct CasByRcu<T> {
-    version: u64,
-
     /// The value that will actually be CASed.
     value: T,
+
+    version: u64,
 }
 
 #[derive(Clone)]
 pub struct Atomic<T>(EpochAtomic<CasByRcu<T>>);
 
 pub trait VersionedCas {
-    fn execute(&self, contention: &mut ContentionMeasure) -> Result<bool, Contention>;
-    fn has_modified_bit(&self) -> bool;
-    fn clear_bit(&self) -> bool;
+    fn execute(
+        &self,
+        contention: &mut ContentionMeasure,
+        guard: &Guard,
+    ) -> Result<bool, Contention>;
+    fn has_modified_bit(&self, guard: &Guard) -> bool;
+    fn clear_bit(&self, guard: &Guard) -> bool;
     fn state(&self) -> CasState;
     fn set_state(&self, new: CasState);
 }
@@ -68,6 +74,17 @@ where
             version: 0,
             value: initial,
         }))
+    }
+
+    // TODO - safety requirements, `raw` should actually point to a CasByRcu<T>
+    /// # Safety
+    pub unsafe fn from_raw(raw: *const T) -> Self {
+        Self(EpochAtomic::<CasByRcu<T>>::from(raw as *const _))
+    }
+
+    pub fn as_raw(&self) -> *const T {
+        let guard = &epoch::pin();
+        self.0.load(Ordering::SeqCst, guard).as_raw() as *const _
     }
 
     pub fn null() -> Self {
@@ -89,7 +106,7 @@ where
         f(&this.value, this.version)
     }
 
-    pub fn set<'g>(&self, value: T, guard: &'g Guard) {
+    pub fn set(&self, value: T, guard: &Guard) {
         let this_ptr = self.get(guard);
         // Safety: We always point to a valid memory.
         let this = unsafe { this_ptr.deref() };
@@ -286,25 +303,26 @@ impl<LF: NormalizedLockFree, const N: usize> WaitFreeSimulator<LF, N>
 where
     for<'a> &'a LF::CommitDescriptor: IntoIterator<Item = &'a dyn VersionedCas>,
 {
-    fn cas_execute(
+    fn cas_execute<'g>(
         &self,
         descriptors: &LF::CommitDescriptor,
         contention: &mut ContentionMeasure,
+        guard: &'g Guard,
     ) -> Result<(), CasExecuteFailure> {
         for (i, cas) in descriptors.into_iter().enumerate() {
             match cas.state() {
                 CasState::Success => {
-                    cas.clear_bit();
+                    cas.clear_bit(guard);
                 }
                 CasState::Failure => {
                     return Err(CasExecuteFailure::CasFailed(i));
                 }
                 CasState::Pending => {
-                    cas.execute(contention)?;
-                    if cas.has_modified_bit() {
+                    cas.execute(contention, guard)?;
+                    if cas.has_modified_bit(guard) {
                         // XXX: Paper and code diverge here.
                         cas.set_state(CasState::Success);
-                        cas.clear_bit();
+                        cas.clear_bit(guard);
                     }
                     if cas.state() != CasState::Success {
                         cas.set_state(CasState::Failure);
@@ -337,19 +355,20 @@ where
                         Err(Contention) => continue,
                     };
                     OperationRecord {
-                        owner: or.owner.clone(),
+                        owner: or.owner,
                         input: or.input.clone(),
                         state: OperationState::ExecuteCas(cas_list),
                     }
                 }
                 OperationState::ExecuteCas(cas_list) => {
-                    let outcome = match self.cas_execute(cas_list, &mut ContentionMeasure::new()) {
-                        Ok(outcome) => Ok(outcome),
-                        Err(CasExecuteFailure::CasFailed(i)) => Err(i),
-                        Err(CasExecuteFailure::Contention) => continue,
-                    };
+                    let outcome =
+                        match self.cas_execute(cas_list, &mut ContentionMeasure::new(), guard) {
+                            Ok(outcome) => Ok(outcome),
+                            Err(CasExecuteFailure::CasFailed(i)) => Err(i),
+                            Err(CasExecuteFailure::Contention) => continue,
+                        };
                     OperationRecord {
-                        owner: or.owner.clone(),
+                        owner: or.owner,
                         input: or.input.clone(),
                         state: OperationState::PostCas(cas_list.clone(), outcome),
                     }
@@ -363,14 +382,14 @@ where
                         guard,
                     ) {
                         Ok(Some(result)) => OperationRecord {
-                            owner: or.owner.clone(),
+                            owner: or.owner,
                             input: or.input.clone(),
                             state: OperationState::Completed(result),
                         },
                         Ok(None) => {
                             // We need to re-start from the generator.
                             OperationRecord {
-                                owner: or.owner.clone(),
+                                owner: or.owner,
                                 input: or.input.clone(),
                                 state: OperationState::PreCas,
                             }
@@ -403,8 +422,8 @@ where
         }
     }
 
-    fn help_first<'g>(&self, guard: &'g Guard) {
-        if let Some(help) = self.shared.help.peek(&guard) {
+    fn help_first(&self, guard: &Guard) {
+        if let Some(help) = self.shared.help.peek(guard) {
             // Safety: The operation still exists in the queue, which means it hasn't been
             // completed yet, and thereby wasn't dropped.
             // TODO - is it though??
@@ -413,7 +432,7 @@ where
         }
     }
 
-    pub fn run<'g>(&self, op: LF::Input, guard: &'g Guard) -> LF::Output {
+    pub fn run(&self, op: LF::Input, guard: &Guard) -> LF::Output {
         let help = /* once in a while */ true;
         if help {
             self.help_first(guard);

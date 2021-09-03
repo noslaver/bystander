@@ -87,7 +87,7 @@ where
         Self { head, tail, state }
     }
 
-    pub(crate) fn enqueue<'g>(&self, id: usize, value: T, guard: &'g Guard) {
+    pub(crate) fn enqueue(&self, id: usize, value: T, guard: &Guard) {
         let phase = self.max_phase(guard).map_or(0, |p| p + 1);
         // Old code used `store` here, discarding the old value saved in `state[id]`.
         // We want to reclaim that value, and drop it.
@@ -128,7 +128,7 @@ where
         }
     }
 
-    pub(crate) fn try_remove_front<'g>(&self, front: T, guard: &'g Guard) -> Result<(), ()> {
+    pub(crate) fn try_remove_front(&self, front: T, guard: &Guard) -> Result<(), ()> {
         let curr_head_ptr = self.head.load(Ordering::SeqCst, guard);
         // Safety: head always points to valid memory.
         let curr_head = unsafe { curr_head_ptr.deref() };
@@ -160,7 +160,7 @@ where
         }
     }
 
-    fn help<'g>(&self, phase: u64, guard: &'g Guard) {
+    fn help(&self, phase: u64, guard: &Guard) {
         for (id, desc_atomic) in self.state.iter().enumerate() {
             let desc_ptr = desc_atomic.load(Ordering::SeqCst, guard);
             // Safety:
@@ -176,7 +176,7 @@ where
         }
     }
 
-    fn help_enq<'g>(&self, id: usize, phase: u64, guard: &'g Guard) {
+    fn help_enq(&self, id: usize, phase: u64, guard: &Guard) {
         while self.is_still_pending(id, phase, guard) {
             let last_ptr = self.tail.load(Ordering::SeqCst, guard);
             // Safety: tail always points to valid memory.
@@ -236,7 +236,7 @@ where
         }
     }
 
-    fn help_finish_enq<'g>(&self, guard: &'g Guard) {
+    fn help_finish_enq(&self, guard: &Guard) {
         let last_ptr = self.tail.load(Ordering::SeqCst, guard);
         // Safety: tail always points to valid memory.
         let last = unsafe { last_ptr.deref() };
@@ -309,7 +309,7 @@ where
         );
     }
 
-    fn max_phase<'g>(&self, guard: &'g Guard) -> Option<u64> {
+    fn max_phase(&self, guard: &Guard) -> Option<u64> {
         self.state
             .iter()
             .filter_map(|s| {
@@ -320,7 +320,7 @@ where
             .max()
     }
 
-    fn is_still_pending<'g>(&self, id: usize, phase: u64, guard: &'g Guard) -> bool {
+    fn is_still_pending(&self, id: usize, phase: u64, guard: &Guard) -> bool {
         // Safety:
         // `state`'s elements are always allocated.
         let state = unsafe { self.state[id].load(Ordering::SeqCst, guard).deref() };
@@ -338,27 +338,28 @@ mod tests {
         const ID: usize = 0usize;
         let queue = WaitFreeHelpQueue::<_, 1>::new();
 
-        let guard = &epoch::pin();
+        {
+            let guard = &epoch::pin();
+            queue.enqueue(ID, 1, guard);
+        }
 
-        queue.enqueue(ID, 1, guard);
+        {
+            let guard = &epoch::pin();
+            let elem = queue.peek(guard);
+            assert_eq!(elem, Some(&1));
+        }
 
-        drop(guard);
-        let guard = &epoch::pin();
+        {
+            let guard = &epoch::pin();
+            let res = queue.try_remove_front(1, guard);
+            assert!(res.is_ok());
+        }
 
-        let elem = queue.peek(guard);
-        assert_eq!(elem, Some(&1));
-
-        drop(guard);
-        let guard = &epoch::pin();
-
-        let res = queue.try_remove_front(1, guard);
-        assert!(res.is_ok());
-
-        drop(guard);
-        let guard = &epoch::pin();
-
-        let res = queue.try_remove_front(1, guard);
-        assert!(res.is_err());
+        {
+            let guard = &epoch::pin();
+            let res = queue.try_remove_front(1, guard);
+            assert!(res.is_err());
+        }
     }
 
     #[test]
@@ -366,43 +367,46 @@ mod tests {
         const ID: usize = 0usize;
         let queue = WaitFreeHelpQueue::<_, 1>::new();
 
-        let guard = &epoch::pin();
-        queue.enqueue(ID, 1, guard);
+        {
+            let guard = &epoch::pin();
+            queue.enqueue(ID, 1, guard);
+        }
 
-        drop(guard);
-        let guard = &epoch::pin();
+        {
+            let guard = &epoch::pin();
+            queue.enqueue(ID, 2, guard);
+        }
 
-        queue.enqueue(ID, 2, guard);
+        {
+            let guard = &epoch::pin();
+            let elem = queue.peek(guard);
+            assert_eq!(elem, Some(&1));
+        }
 
-        drop(guard);
-        let guard = &epoch::pin();
+        {
+            let guard = &epoch::pin();
 
-        let elem = queue.peek(guard);
-        assert_eq!(elem, Some(&1));
+            // Fail to enqueue element not on top
+            let res = queue.try_remove_front(2, guard);
+            assert!(res.is_err());
+        }
 
-        drop(guard);
-        let guard = &epoch::pin();
+        {
+            let guard = &epoch::pin();
+            let res = queue.try_remove_front(1, guard);
+            assert!(res.is_ok());
+        }
 
-        // Fail to enqueue element not on top
-        let res = queue.try_remove_front(2, guard);
-        assert!(res.is_err());
+        {
+            let guard = &epoch::pin();
+            let elem = queue.peek(guard);
+            assert_eq!(elem, Some(&2));
+        }
 
-        drop(guard);
-        let guard = &epoch::pin();
-
-        let res = queue.try_remove_front(1, guard);
-        assert!(res.is_ok());
-
-        drop(guard);
-        let guard = &epoch::pin();
-
-        let elem = queue.peek(guard);
-        assert_eq!(elem, Some(&2));
-
-        drop(guard);
-        let guard = &epoch::pin();
-
-        let res = queue.try_remove_front(2, guard);
-        assert!(res.is_ok());
+        {
+            let guard = &epoch::pin();
+            let res = queue.try_remove_front(2, guard);
+            assert!(res.is_ok());
+        }
     }
 }
