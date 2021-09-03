@@ -1,55 +1,34 @@
 mod linked_list;
 
-use crossbeam_epoch::{self as epoch, Guard, Owned, Shared};
+use crossbeam_epoch::{self as epoch, Guard};
 use linked_list::{LinkedList as LockFreeLinkedList, Node};
-use std::sync::atomic::Ordering;
 
 use bystander::{
     Atomic, CasState, Contention, ContentionMeasure, NormalizedLockFree, VersionedCas,
     WaitFreeSimulator,
 };
 
-const N: usize = 20; // 🤔
-
 // in a consuming crate (wait-free-linked-list crate)
-pub struct WaitFreeLinkedList<T>
-where
-    T: Clone + Copy + PartialEq + Eq + PartialOrd + Ord,
-{
-    _simulator: WaitFreeSimulator<LockFreeLinkedList<T>, N>,
+pub struct WaitFreeLinkedList<const N: usize> {
+    _simulator: WaitFreeSimulator<LockFreeLinkedList, N>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InputOp<T>
-where
-    T: Clone + Copy + PartialEq + Eq + PartialOrd + Ord,
-{
-    Insert(T),
-    Delete(T),
-    Find(T),
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InputOp {
+    Insert(usize),
+    Delete(usize),
+    Find(usize),
 }
 
-struct ReferenceQuartet<T> {
-    reference: T,
+#[derive(Clone, PartialEq, Eq)]
+struct ReferenceQuartet {
+    reference: Node,
     mark_bit: bool,
     help_bit: bool,
 }
 
-impl<T> Eq for ReferenceQuartet<T> where T: PartialEq {}
-
-impl<T> PartialEq for ReferenceQuartet<T>
-where
-    T: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.reference == other.reference
-            && self.mark_bit == other.mark_bit
-            && self.help_bit == other.help_bit
-    }
-}
-
-impl<T> ReferenceQuartet<T> {
-    fn new(reference: T, mark_bit: bool, help_bit: bool) -> Self {
+impl ReferenceQuartet {
+    fn new(reference: Node, mark_bit: bool, help_bit: bool) -> Self {
         Self {
             reference,
             mark_bit,
@@ -58,16 +37,14 @@ impl<T> ReferenceQuartet<T> {
     }
 }
 
-struct DoubleMarkReference<T>(Atomic<ReferenceQuartet<T>>);
+#[derive(Clone)]
+struct DoubleMarkReference(Atomic<ReferenceQuartet>);
 
-impl<T> DoubleMarkReference<T>
-where
-    T: PartialEq,
-{
-    fn new(reference: T, mark_bit: bool, help_bit: bool) -> Self {
-        Self(Atomic::<ReferenceQuartet<T>>::new(
-            ReferenceQuartet::<T>::new(reference, mark_bit, help_bit),
-        ))
+impl DoubleMarkReference {
+    fn new(reference: Node, mark_bit: bool, help_bit: bool) -> Self {
+        Self(Atomic::<ReferenceQuartet>::new(ReferenceQuartet::new(
+            reference, mark_bit, help_bit,
+        )))
     }
 
     fn get_version<'g>(&self, guard: &'g Guard) -> u64 {
@@ -76,8 +53,8 @@ where
 
     fn compare_and_set<'g>(
         &self,
-        expected: T,
-        new: T,
+        expected: Node,
+        new: Node,
         expected_mark: bool,
         new_mark: bool,
         expected_help: bool,
@@ -108,26 +85,26 @@ where
     }
 }
 
-pub struct ListCasDescriptor<'g, T> {
-    holder: DoubleMarkReference<Node<T>>,
-    old_ref: Shared<'g, Node<T>>, // TODO
-    new_ref: Owned<Node<T>>,
+#[derive(Clone)]
+pub struct ListCasDescriptor {
+    holder: DoubleMarkReference,
+    // old_ref: Shared<'g, Node>, // TODO
+    old_ref: *const Node, // TODO
+    new_ref: Node,
     old_mark: bool,
     new_mark: bool,
     old_version: u64,
     state: CasState,
 }
 
-impl<'g, T> ListCasDescriptor<'g, T>
-where
-    T: PartialEq,
-{
+impl ListCasDescriptor {
     fn new(
-        holder: DoubleMarkReference<Node<T>>,
-        old_ref: Node<T>,
-        new_ref: Node<T>,
+        holder: DoubleMarkReference,
+        old_ref: *const Node,
+        new_ref: Node,
         old_mark: bool,
         new_mark: bool,
+        old_version: u64,
     ) -> Self {
         Self {
             holder,
@@ -135,14 +112,16 @@ where
             new_ref,
             old_mark,
             new_mark,
-            old_version: holder.get_version(),
+            old_version,
             state: CasState::Pending,
         }
     }
 }
 
-impl<'g, T> VersionedCas for ListCasDescriptor<'g, T> {
-    fn execute(&self, _contention: &mut ContentionMeasure) -> Result<bool, Contention> {
+impl VersionedCas for ListCasDescriptor {
+    fn execute(&self, contention: &mut ContentionMeasure) -> Result<bool, Contention> {
+        // TODO
+        let guard = &epoch::pin();
         Ok(self.holder.compare_and_set(
             self.old_ref,
             self.new_ref,
@@ -150,6 +129,8 @@ impl<'g, T> VersionedCas for ListCasDescriptor<'g, T> {
             self.new_mark,
             false,
             true,
+            contention,
+            guard,
         ))
     }
 
@@ -163,6 +144,8 @@ impl<'g, T> VersionedCas for ListCasDescriptor<'g, T> {
     }
 
     fn clear_bit(&self) -> bool {
+        // TODO
+        let guard = &epoch::pin();
         self.holder.compare_and_set(
             self.new_ref,
             self.new_ref,
@@ -170,6 +153,8 @@ impl<'g, T> VersionedCas for ListCasDescriptor<'g, T> {
             self.new_mark,
             true,
             false,
+            &mut ContentionMeasure::new(),
+            guard,
         )
     }
 
@@ -182,60 +167,60 @@ impl<'g, T> VersionedCas for ListCasDescriptor<'g, T> {
     }
 }
 
-impl<T> NormalizedLockFree for LockFreeLinkedList<T>
-where
-    T: Clone + Copy + PartialEq + Eq + PartialOrd + Ord,
-{
-    type Input = InputOp<T>;
+impl NormalizedLockFree for LockFreeLinkedList {
+    type Input = InputOp;
     type Output = bool;
 
-    type CommitDescriptor<'g> = Option<ListCasDescriptor<'g, T>>;
+    type CommitDescriptor = Option<ListCasDescriptor>;
 
     fn generator<'g>(
         &self,
         op: &Self::Input,
-        _contention: &mut ContentionMeasure,
+        _contention: &mut ContentionMeasure, // TODO
         guard: &'g Guard,
     ) -> Result<Self::CommitDescriptor, Contention> {
-        match op {
+        match *op {
             InputOp::Insert(key) => {
-                let (left_ptr, right_ptr) = self.search(key, guard);
+                let (left_ptr, right_ptr) = self.search(Some(key), guard);
 
                 let right = unsafe { right_ptr.deref() };
                 let left = unsafe { left_ptr.deref() };
 
                 // Key already in list
-                if right_ptr != self.tail.load(Ordering::SeqCst, guard) && right.key == Some(key) {
+                if right != self.tail.with(|tail, _| tail, guard) && right.key == Some(key) {
                     return Ok(None);
                 }
 
                 let mut new = Node::new(key);
-                new.next = Atomic::<Node<T>>::from(right_ptr);
+                // TODO - get Atomic from Shared and then clone
+                // new.next = Atomic::<Node>::from(right_ptr);
 
-                Ok(Some(todo!()))
-                //ListCasDescriptor::new(
+                todo!()
+                //Ok(Some(ListCasDescriptor::new(
                 //self.holder,
                 //self.old_ref,
                 //self.new_ref,
                 //self.old_mark,
-                //self.new_mark)
+                //self.new_mark,
+                //self.holder.get_version(guard))))
             }
             InputOp::Delete(key) => {
-                let (left_ptr, right_ptr) = self.search(key, guard);
+                let (left_ptr, right_ptr) = self.search(Some(key), guard);
 
                 let right = unsafe { right_ptr.deref() };
 
-                if right_ptr == self.tail.load(Ordering::SeqCst, guard) || right.key != Some(key) {
+                if right == self.tail.with(|tail, _| tail, guard) || right.key != Some(key) {
                     return Ok(None);
                 }
 
-                Ok(Some(todo!()))
-                //ListCasDescriptor::new(
+                todo!()
+                //Ok(Some(ListCasDescriptor::new(
                 //self.holder,
                 //self.old_ref,
                 //self.new_ref,
                 //self.old_mark,
-                //self.new_mark)
+                //self.new_mark,
+                //self.holder.get_version(guard))))
             }
             InputOp::Find(key) => {
                 return Ok(None);
@@ -251,11 +236,11 @@ where
         _contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<Option<Self::Output>, Contention> {
-        match op {
+        match *op {
             InputOp::Delete(key) | InputOp::Insert(key) => {
-                if performed.is_empty() {
+                if performed.is_none() {
                     // Operation failed
-                    Ok(Some(false));
+                    return Ok(Some(false));
                 }
                 match _executed {
                     Ok(()) => Ok(Some(true)),
@@ -279,7 +264,7 @@ where
     ) -> Result<Self::Output, Contention> {
         // On fast path, just use the existing algorithm API
         // If fails return contention
-        match op {
+        match *op {
             InputOp::Insert(key) => self.insert(key, contention, guard),
             InputOp::Delete(key) => self.delete(key, contention, guard),
             InputOp::Find(key) => self.find(key, guard),
@@ -300,6 +285,3 @@ where
 //        // self.simulator.run(Insert(t))
 //    }
 //}
-
-#[test]
-fn wait_free_sim() {}

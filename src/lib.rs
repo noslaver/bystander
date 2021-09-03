@@ -16,6 +16,10 @@ pub struct Contention;
 // in bystander
 pub struct ContentionMeasure(usize);
 impl ContentionMeasure {
+    pub fn new() -> Self {
+        Self(0)
+    }
+
     pub fn detected(&mut self) -> Result<(), Contention> {
         self.0 += 1;
         if self.0 < CONTENTION_THRESHOLD {
@@ -44,6 +48,7 @@ struct CasByRcu<T> {
     value: T,
 }
 
+#[derive(Clone)]
 pub struct Atomic<T>(EpochAtomic<CasByRcu<T>>);
 
 pub trait VersionedCas {
@@ -315,7 +320,7 @@ where
                 OperationState::PreCas => {
                     let cas_list = match self.shared.algorithm.generator(
                         &or.input,
-                        &mut ContentionMeasure(0),
+                        &mut ContentionMeasure::new(),
                         guard,
                     ) {
                         Ok(cas_list) => cas_list,
@@ -328,7 +333,7 @@ where
                     }
                 }
                 OperationState::ExecuteCas(cas_list) => {
-                    let outcome = match self.cas_execute(cas_list, &mut ContentionMeasure(0)) {
+                    let outcome = match self.cas_execute(cas_list, &mut ContentionMeasure::new()) {
                         Ok(outcome) => Ok(outcome),
                         Err(CasExecuteFailure::CasFailed(i)) => Err(i),
                         Err(CasExecuteFailure::Contention) => continue,
@@ -344,7 +349,7 @@ where
                         &or.input,
                         *outcome,
                         cas_list,
-                        &mut ContentionMeasure(0),
+                        &mut ContentionMeasure::new(),
                         guard,
                     ) {
                         Ok(Some(result)) => OperationRecord {
@@ -406,7 +411,7 @@ where
 
         // fast path
         for retry in 0.. {
-            let mut contention = ContentionMeasure(0);
+            let mut contention = ContentionMeasure::new();
             match self.shared.algorithm.fast_path(&op, &mut contention, guard) {
                 Ok(result) => return result,
                 Err(Contention) => {}

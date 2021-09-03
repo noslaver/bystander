@@ -2,34 +2,21 @@ use bystander::{Atomic, Contention, ContentionMeasure};
 use crossbeam_epoch::{Guard, Owned, Shared};
 use std::sync::atomic::Ordering;
 
-pub(crate) struct Node<T> {
-    key: Option<T>,
-    next: Atomic<Self>,
+#[derive(Clone, PartialEq, Eq)]
+pub struct Node {
+    pub key: Option<usize>,
+    pub next: Atomic<Self>,
 }
 
-impl<T> Eq for Node<T> where T: PartialEq + Eq {}
-impl<T> PartialEq for Node<T>
-where
-    T: PartialEq + Eq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        // self.key == other.key || (self.key.is_none() && self.next.get)
-        true
-    }
-}
-
-impl<T> Node<T>
-where
-    T: PartialEq + Eq,
-{
-    fn new(key: T) -> Self {
+impl Node {
+    pub fn new(key: usize) -> Self {
         Self {
             key: Some(key),
             next: Atomic::null(),
         }
     }
 
-    fn sentinel() -> Self {
+    pub fn sentinel() -> Self {
         Self {
             key: None,
             next: Atomic::null(),
@@ -37,18 +24,15 @@ where
     }
 }
 
-pub struct LinkedList<T> {
-    head: Atomic<Node<T>>,
-    tail: Atomic<Node<T>>,
+pub struct LinkedList {
+    pub head: Atomic<Node>,
+    pub tail: Atomic<Node>,
 }
 
-impl<T> LinkedList<T>
-where
-    T: Copy + Ord + PartialOrd + Eq + PartialEq,
-{
+impl LinkedList {
     pub fn new() -> Self {
-        let tail = Atomic::new(Node::<T>::sentinel());
-        let mut head = Node::<T>::sentinel();
+        let tail = Atomic::new(Node::sentinel());
+        let mut head = Node::sentinel();
         head.next = tail.clone();
         let head = Atomic::new(head);
         Self { head, tail }
@@ -56,7 +40,7 @@ where
 
     pub fn insert<'g>(
         &self,
-        key: T,
+        key: usize,
         contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<bool, Contention> {
@@ -68,15 +52,16 @@ where
             let left = unsafe { left_ptr.deref() };
 
             // Key already in list
-            if right_ptr != self.tail.load(Ordering::SeqCst, guard) && right.key == Some(key) {
+            if right_ptr != self.tail.with(|tail, _| tail, guard) && right.key == Some(key) {
                 return Ok(false);
             }
 
             let mut new = Node::new(key);
-            new.next = Atomic::<Node<T>>::from(right_ptr);
+            // TODO
+            // new.next = Atomic::<Node>::from(right_ptr);
             let new_ptr = Owned::new(new);
             // TODO - change to atomic (?) and return proper values
-            match left.next.compare_exchange(
+            match left.next.compare_and_set(
                 right_ptr,
                 new_ptr,
                 Ordering::SeqCst,
@@ -91,7 +76,7 @@ where
 
     pub fn delete<'g>(
         &self,
-        key: T,
+        key: usize,
         contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<bool, Contention> {
@@ -100,7 +85,7 @@ where
         let mut right_next;
         let mut left;
 
-        let tail = self.tail.load(Ordering::SeqCst, guard);
+        let tail = self.tail.with(|tail, _| tail, guard);
 
         loop {
             let (left_ptr, r_ptr) = self.search(Some(key), guard);
@@ -108,7 +93,7 @@ where
             right = unsafe { right_ptr.deref() };
             left = unsafe { left_ptr.deref() };
 
-            if (right_ptr == tail) || (right.key != Some(key)) {
+            if (right == tail) || (right.key != Some(key)) {
                 return Ok(false);
             }
 
@@ -150,7 +135,7 @@ where
     }
 
     // TODO - use contention??
-    pub fn find<'g>(&self, key: T, guard: &'g Guard) -> Result<bool, Contention> {
+    pub fn find<'g>(&self, key: usize, guard: &'g Guard) -> Result<bool, Contention> {
         let (_, right_ptr) = self.search(Some(key), guard);
         let right = unsafe { right_ptr.deref() };
 
@@ -164,9 +149,9 @@ where
 
     pub(crate) fn search<'g>(
         &self,
-        key: Option<T>,
+        key: Option<usize>,
         guard: &'g Guard,
-    ) -> (Shared<'g, Node<T>>, Shared<'g, Node<T>>) {
+    ) -> (Shared<'g, Node>, Shared<'g, Node>) {
         let mut left_ptr = Shared::null();
         let mut left_next = Shared::null();
         let mut right_ptr;
@@ -231,132 +216,132 @@ where
 #[cfg(test)]
 mod tests {
 
-    use super::*;
-    use crossbeam_epoch::{self as epoch};
-    use std::{sync::Arc, thread, time::Duration};
+    //use super::*;
+    //use crossbeam_epoch::{self as epoch};
+    //use std::{sync::Arc, thread, time::Duration};
 
-    #[test]
-    fn new() {
-        let _ = LinkedList::<i32>::new();
-    }
+    //#[test]
+    //fn new() {
+    //    let _ = LinkedList::<i32>::new();
+    //}
 
-    #[test]
-    fn insert() {
-        let list = LinkedList::<i32>::new();
-        let guard = &epoch::pin();
-        assert!(list.insert(1, guard));
-    }
+    //#[test]
+    //fn insert() {
+    //    let list = LinkedList::<i32>::new();
+    //    let guard = &epoch::pin();
+    //    assert!(list.insert(1, guard));
+    //}
 
-    #[test]
-    fn insert_find() {
-        let list = LinkedList::<i32>::new();
-        let guard = &epoch::pin();
-        assert!(list.insert(1, guard));
-        assert!(list.find(1, guard));
-    }
+    //#[test]
+    //fn insert_find() {
+    //    let list = LinkedList::<i32>::new();
+    //    let guard = &epoch::pin();
+    //    assert!(list.insert(1, guard));
+    //    assert!(list.find(1, guard));
+    //}
 
-    #[test]
-    fn insert_find_remove() {
-        let list = LinkedList::<i32>::new();
-        let guard = &epoch::pin();
-        assert!(list.insert(1, guard));
-        assert!(list.find(1, guard));
-        assert!(list.delete(1, guard));
-        assert!(!list.find(1, guard));
-    }
+    //#[test]
+    //fn insert_find_remove() {
+    //    let list = LinkedList::<i32>::new();
+    //    let guard = &epoch::pin();
+    //    assert!(list.insert(1, guard));
+    //    assert!(list.find(1, guard));
+    //    assert!(list.delete(1, guard));
+    //    assert!(!list.find(1, guard));
+    //}
 
-    #[test]
-    fn remove_empty() {
-        let list = LinkedList::<i32>::new();
-        let guard = &epoch::pin();
-        assert!(!list.delete(1, guard));
-    }
+    //#[test]
+    //fn remove_empty() {
+    //    let list = LinkedList::<i32>::new();
+    //    let guard = &epoch::pin();
+    //    assert!(!list.delete(1, guard));
+    //}
 
-    #[test]
-    fn insert_concurrent() {
-        let list = Arc::new(LinkedList::<i32>::new());
-        let mut handles = vec![];
+    //#[test]
+    //fn insert_concurrent() {
+    //    let list = Arc::new(LinkedList::<i32>::new());
+    //    let mut handles = vec![];
 
-        for id in 0..1000 {
-            let list = list.clone();
-            handles.push(thread::spawn(move || {
-                let guard = &epoch::pin();
-                assert!(list.insert(id, guard));
-                assert!(list.find(id, guard));
-            }));
-        }
+    //    for id in 0..1000 {
+    //        let list = list.clone();
+    //        handles.push(thread::spawn(move || {
+    //            let guard = &epoch::pin();
+    //            assert!(list.insert(id, guard));
+    //            assert!(list.find(id, guard));
+    //        }));
+    //    }
 
-        for handle in handles {
-            handle.join().unwrap();
-        }
+    //    for handle in handles {
+    //        handle.join().unwrap();
+    //    }
 
-        let guard = &epoch::pin();
-        for id in 0..1000 {
-            assert!(list.delete(id, guard));
-        }
-    }
+    //    let guard = &epoch::pin();
+    //    for id in 0..1000 {
+    //        assert!(list.delete(id, guard));
+    //    }
+    //}
 
-    #[test]
-    fn delete_concurrent() {
-        let list = Arc::new(LinkedList::<i32>::new());
-        let mut handles = vec![];
+    //#[test]
+    //fn delete_concurrent() {
+    //    let list = Arc::new(LinkedList::<i32>::new());
+    //    let mut handles = vec![];
 
-        let guard = &epoch::pin();
-        for id in 0..1000 {
-            assert!(list.insert(id, guard));
-        }
-        drop(guard);
+    //    let guard = &epoch::pin();
+    //    for id in 0..1000 {
+    //        assert!(list.insert(id, guard));
+    //    }
+    //    drop(guard);
 
-        for id in 0..1000 {
-            let list = list.clone();
-            handles.push(thread::spawn(move || {
-                let guard = &epoch::pin();
-                assert!(list.find(id, guard));
-                thread::yield_now();
-                assert!(list.delete(id, guard));
-            }));
-        }
+    //    for id in 0..1000 {
+    //        let list = list.clone();
+    //        handles.push(thread::spawn(move || {
+    //            let guard = &epoch::pin();
+    //            assert!(list.find(id, guard));
+    //            thread::yield_now();
+    //            assert!(list.delete(id, guard));
+    //        }));
+    //    }
 
-        for handle in handles {
-            handle.join().unwrap();
-        }
-    }
+    //    for handle in handles {
+    //        handle.join().unwrap();
+    //    }
+    //}
 
-    #[test]
-    fn two_threads() {
-        let list = Arc::new(LinkedList::<i32>::new());
-        let mut handles = vec![];
+    //#[test]
+    //fn two_threads() {
+    //    let list = Arc::new(LinkedList::<i32>::new());
+    //    let mut handles = vec![];
 
-        let guard = &epoch::pin();
-        for id in 0..10000 {
-            assert!(list.insert(id, guard));
-        }
-        drop(guard);
+    //    let guard = &epoch::pin();
+    //    for id in 0..10000 {
+    //        assert!(list.insert(id, guard));
+    //    }
+    //    drop(guard);
 
-        for _ in 0..2 {
-            let list = list.clone();
-            handles.push(thread::spawn(move || {
-                let mut counter = 0;
-                for key in 0..10000 {
-                    if key % 500 == 0 {
-                        thread::sleep(Duration::from_millis(50));
-                    }
-                    let guard = &epoch::pin();
-                    if list.delete(key, guard) {
-                        counter += 1;
-                    }
-                }
-                print!("counter: {}\n", counter);
-            }));
-        }
+    //    for _ in 0..2 {
+    //        let list = list.clone();
+    //        handles.push(thread::spawn(move || {
+    //            let mut counter = 0;
+    //            for key in 0..10000 {
+    //                if key % 500 == 0 {
+    //                    thread::sleep(Duration::from_millis(50));
+    //                }
+    //                let guard = &epoch::pin();
+    //                if list.delete(key, guard) {
+    //                    counter += 1;
+    //                }
+    //            }
+    //            print!("counter: {}\n", counter);
+    //        }));
+    //    }
 
-        for handle in handles {
-            handle.join().unwrap();
-        }
+    //    for handle in handles {
+    //        handle.join().unwrap();
+    //    }
 
-        let guard = &epoch::pin();
-        for val in 0..10000 {
-            assert!(!list.find(val, guard))
-        }
-    }
+    //    let guard = &epoch::pin();
+    //    for val in 0..10000 {
+    //        assert!(!list.find(val, guard))
+    //    }
+    //}
 }
