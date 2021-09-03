@@ -2,7 +2,7 @@ mod help_queue;
 use help_queue::WaitFreeHelpQueue;
 
 use crossbeam_epoch::{
-    Atomic as EpochAtomic, CompareExchangeError, Guard, Owned, Shared as EpochShared,
+    self as epoch, Atomic as EpochAtomic, CompareExchangeError, Guard, Owned, Shared as EpochShared,
 };
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -80,7 +80,8 @@ where
 
     pub fn with<'g, F, R>(&self, f: F, guard: &'g Guard) -> R
     where
-        F: FnOnce(&T, u64) -> R,
+        F: FnOnce(&'g T, u64) -> R,
+        T: 'g,
     {
         // TODO
         // Safety: We always point to a valid memory.
@@ -156,6 +157,15 @@ where
         } else {
             Ok(false)
         }
+    }
+}
+
+impl<T> Eq for Atomic<T> {}
+
+impl<T> PartialEq for Atomic<T> {
+    fn eq(&self, other: &Self) -> bool {
+        let guard = &epoch::pin();
+        self.0.load(Ordering::SeqCst, guard) == other.0.load(Ordering::SeqCst, guard)
     }
 }
 
