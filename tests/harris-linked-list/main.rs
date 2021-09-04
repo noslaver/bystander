@@ -74,7 +74,7 @@ impl DoubleMarkRef {
     }
 
     fn get_version(&self, guard: &Guard) -> u64 {
-        self.0.with(|_, version| version, guard)
+        self.0.with(|_, version| version, guard).unwrap()
     }
 
     fn compare_and_set<'g>(
@@ -88,9 +88,10 @@ impl DoubleMarkRef {
         contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<bool, Contention> {
-        let (current, new_version) = self
+        let (current, version) = self
             .0
-            .with(|current, version| (current, version + 1), guard);
+            .with(|current, version| (current, version), guard)
+            .unwrap();
 
         if !(expected == &current.node
             && expected_mark == current.mark
@@ -107,7 +108,7 @@ impl DoubleMarkRef {
             current,
             DoubleMarkNode::new(new, new_mark, new_help),
             contention,
-            Some(new_version),
+            Some(version),
             guard,
         )
     }
@@ -177,10 +178,13 @@ impl VersionedCas for ListCasDescriptor {
     }
 
     fn has_modified_bit(&self, guard: &Guard) -> bool {
-        self.holder.0.with(
-            |current, version| current.help && self.old_version + 1 == version,
-            guard,
-        )
+        self.holder
+            .0
+            .with(
+                |current, version| current.help && self.old_version + 1 == version,
+                guard,
+            )
+            .unwrap()
     }
 
     fn clear_bit(&self, guard: &Guard) -> bool {
@@ -273,7 +277,13 @@ impl LinkedList {
             let (pred, curr) = self.search(Some(key), guard)?;
 
             // Key already in list
-            if self.tail.0.with(|tail, _| curr.node != tail.node, guard) && curr.key == Some(key) {
+            if self
+                .tail
+                .0
+                .with(|tail, _| curr.node != tail.node, guard)
+                .unwrap()
+                && curr.key == Some(key)
+            {
                 return Ok(false);
             }
 
@@ -285,7 +295,9 @@ impl LinkedList {
                 .compare_and_set(curr, new, false, false, false, false, contention, guard)
             {
                 Ok(true) => break Ok(true),
-                Ok(false) => continue,
+                Ok(false) => {
+                    continue;
+                }
                 Err(Contention) => break Err(Contention),
             }
         }
@@ -307,13 +319,23 @@ impl LinkedList {
         'retry: loop {
             let (pred, curr) = self.search(Some(key), guard)?;
 
-            if self.tail.0.with(|tail, _| curr.node == tail.node, guard) || curr.key != Some(key) {
+            if self
+                .tail
+                .0
+                .with(|tail, _| curr.node == tail.node, guard)
+                .unwrap()
+                || curr.key != Some(key)
+            {
                 return Ok(false);
             }
 
-            let succ = curr.next.0.with(|curr, _| &curr.node, guard);
+            let succ = curr
+                .next
+                .0
+                .with(|curr, _| &curr.node, guard)
+                .expect("curr is not that tail, so we have a next");
 
-            if curr.next.compare_and_set(
+            if !curr.next.compare_and_set(
                 succ,
                 succ.clone(),
                 false,
@@ -352,7 +374,13 @@ impl LinkedList {
     fn find_impl(&self, key: usize, guard: &Guard) -> Result<bool, Contention> {
         let (_, curr) = self.search(Some(key), guard)?;
 
-        if self.tail.0.with(|tail, _| curr.node == tail.node, guard) || curr.key != Some(key) {
+        if self
+            .tail
+            .0
+            .with(|tail, _| curr.node == tail.node, guard)
+            .unwrap()
+            || curr.key != Some(key)
+        {
             Ok(false)
         } else {
             Ok(true)
@@ -367,11 +395,26 @@ impl LinkedList {
         let mut contention = ContentionMeasure::new();
 
         'retry: loop {
-            let mut pred = self.head.0.with(|curr, _| curr, guard);
-            let mut curr = pred.node.next.0.with(|curr, _| curr, guard);
+            let mut pred = self
+                .head
+                .0
+                .with(|curr, _| curr, guard)
+                .expect("head is not null");
+            let mut curr = pred
+                .node
+                .next
+                .0
+                .with(|curr, _| curr, guard)
+                .expect("head's next is not null");
 
             loop {
-                let mut succ = curr.next.0.with(|curr, _| curr, guard);
+                let mut succ = if let Some(succ) = curr.next.0.with(|curr, _| curr, guard) {
+                    succ
+                } else {
+                    // reached end of list
+                    return Ok((pred, curr));
+                };
+
                 while succ.mark {
                     let res = pred.node.next.compare_and_set(
                         &curr.node,
@@ -389,7 +432,12 @@ impl LinkedList {
                     }
 
                     curr = succ;
-                    succ = curr.node.next.0.with(|curr, _| curr, guard);
+                    succ = if let Some(succ) = curr.next.0.with(|curr, _| curr, guard) {
+                        succ
+                    } else {
+                        // reached end of list
+                        return Ok((pred, curr));
+                    };
                 }
 
                 if curr.node.key >= key {
@@ -402,6 +450,29 @@ impl LinkedList {
         }
 
         Err(Contention)
+    }
+}
+
+impl Drop for LinkedList {
+    fn drop(&mut self) {
+        let guard = &epoch::pin();
+
+        let mut curr = self.head.clone();
+        let mut next = curr
+            .0
+            .with(|curr, _| curr.node.clone(), guard)
+            .unwrap()
+            .next;
+
+        while !next.0.is_null(guard) {
+            unsafe { curr.0.drop() };
+            curr = next;
+            next = curr
+                .0
+                .with(|curr, _| curr.node.clone(), guard)
+                .unwrap()
+                .next;
+        }
     }
 }
 
@@ -422,7 +493,11 @@ impl NormalizedLockFree for LinkedList {
                 let (pred, curr) = self.search(Some(key), guard)?;
 
                 // Key already in list
-                if self.tail.0.with(|tail, _| curr.node != tail.node, guard)
+                if self
+                    .tail
+                    .0
+                    .with(|tail, _| curr.node != tail.node, guard)
+                    .unwrap()
                     && curr.key == Some(key)
                 {
                     return Ok(None);
@@ -443,7 +518,11 @@ impl NormalizedLockFree for LinkedList {
             InputOp::Delete(key) => {
                 let (_pred, curr) = self.search(Some(key), guard)?;
 
-                if self.tail.0.with(|tail, _| tail.node == curr.node, guard)
+                if self
+                    .tail
+                    .0
+                    .with(|tail, _| tail.node == curr.node, guard)
+                    .unwrap()
                     || curr.key != Some(key)
                 {
                     return Ok(None);
@@ -452,7 +531,10 @@ impl NormalizedLockFree for LinkedList {
                 Ok(Some(ListCasDescriptor::new(
                     curr.next.clone(),
                     curr.next.0.as_raw() as *const _,
-                    curr.next.0.with(|curr, _| curr.node.clone(), guard),
+                    curr.next
+                        .0
+                        .with(|next, _| next.node.clone(), guard)
+                        .expect("curr is not the tail"),
                     false,
                     true,
                     curr.next.get_version(guard),
@@ -507,8 +589,24 @@ impl NormalizedLockFree for LinkedList {
 }
 
 #[test]
-fn nothing_works() {
+fn it_almost_works() {
     let linked_list = WaitFreeLinkedList::<1>::new();
 
-    linked_list.insert(1);
+    assert!(linked_list.insert(1));
+    assert!(linked_list.find(1));
+    assert!(!linked_list.insert(1));
+    assert!(linked_list.find(1));
+    assert!(linked_list.insert(2));
+    assert!(linked_list.find(2));
+
+    assert!(linked_list.delete(1));
+    assert!(!linked_list.find(1));
+
+    assert!(linked_list.delete(2));
+    assert!(!linked_list.find(2));
+
+    // for i in 3..127 {
+    //     assert!(linked_list.insert(i));
+    //     assert!(linked_list.find(i));
+    // }
 }

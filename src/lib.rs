@@ -91,19 +91,33 @@ where
         Self(EpochAtomic::null())
     }
 
+    pub fn is_null(&self, guard: &Guard) -> bool {
+        self.get(guard).is_null()
+    }
+
+    // TODO
+    /// # Safety
+    pub unsafe fn drop(self) {
+        self.0.into_owned();
+    }
+
     fn get<'g>(&self, guard: &'g Guard) -> EpochShared<'g, CasByRcu<T>> {
         self.0.load(Ordering::SeqCst, guard)
     }
 
-    pub fn with<'g, F, R>(&self, f: F, guard: &'g Guard) -> R
+    pub fn with<'g, F, R>(&self, f: F, guard: &'g Guard) -> Option<R>
     where
         F: FnOnce(&'g T, u64) -> R,
         T: 'g,
     {
-        // TODO
-        // Safety: We always point to a valid memory.
-        let this = unsafe { self.get(guard).deref() };
-        f(&this.value, this.version)
+        let this = self.get(guard);
+        if this.is_null() {
+            None
+        } else {
+            // Safety: We always point to a valid memory or `null`.
+            let this = unsafe { this.deref() };
+            Some(f(&this.value, this.version))
+        }
     }
 
     pub fn set(&self, value: T, guard: &Guard) {
