@@ -328,85 +328,202 @@ where
     }
 }
 
+unsafe impl<T, const N: usize> Sync for WaitFreeHelpQueue<T, N> {}
+unsafe impl<T, const N: usize> Send for WaitFreeHelpQueue<T, N> {}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crossbeam_epoch as epoch;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
-    fn single_threaded() {
+    fn new() {
+        let _queue = WaitFreeHelpQueue::<i32, 1>::new();
+    }
+
+    #[test]
+    fn enqueue() {
         const ID: usize = 0usize;
         let queue = WaitFreeHelpQueue::<_, 1>::new();
 
-        {
-            let guard = &epoch::pin();
-            queue.enqueue(ID, 1, guard);
+        let guard = epoch::pin();
+
+        queue.enqueue(ID, 1, &guard);
+        drop(guard);
+
+        let guard = epoch::pin();
+
+        let elem = queue.peek(&guard);
+        assert_eq!(elem, Some(&1));
+    }
+
+    #[test]
+    fn peek_empty() {
+        let queue = WaitFreeHelpQueue::<i32, 1>::new();
+
+        let guard = epoch::pin();
+        let elem = queue.peek(&guard);
+        assert!(elem.is_none());
+    }
+
+    #[test]
+    fn remove_empty() {
+        let queue = WaitFreeHelpQueue::<i32, 1>::new();
+
+        let guard = &epoch::pin();
+        let res = queue.try_remove_front(1, guard);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn remove_wrong_front() {
+        const ID: usize = 0usize;
+        let queue = WaitFreeHelpQueue::<_, 1>::new();
+
+        let guard = epoch::pin();
+
+        queue.enqueue(ID, 1, &guard);
+        drop(guard);
+
+        let guard = epoch::pin();
+
+        let elem = queue.peek(&guard);
+        assert_eq!(elem, Some(&1));
+
+        let res = queue.try_remove_front(2, &guard);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn insert_get_remove() {
+        const ID: usize = 0usize;
+        let queue = WaitFreeHelpQueue::<_, 1>::new();
+
+        let guard = epoch::pin();
+
+        queue.enqueue(ID, 1, &guard);
+
+        drop(guard);
+        let guard = epoch::pin();
+
+        let elem = queue.peek(&guard);
+        assert_eq!(elem, Some(&1));
+
+        drop(guard);
+        let guard = epoch::pin();
+
+        let res = queue.try_remove_front(1, &guard);
+        assert!(res.is_ok());
+
+        drop(guard);
+    }
+
+    #[test]
+    fn insert_two_remove_both() {
+        const ID: usize = 0usize;
+        let queue = WaitFreeHelpQueue::<_, 1>::new();
+
+        let guard = epoch::pin();
+        queue.enqueue(ID, 1, &guard);
+
+        drop(guard);
+        let guard = epoch::pin();
+
+        queue.enqueue(ID, 2, &guard);
+
+        drop(guard);
+        let guard = epoch::pin();
+
+        let elem = queue.peek(&guard);
+        assert_eq!(elem, Some(&1));
+
+        drop(guard);
+        let guard = epoch::pin();
+
+        let res = queue.try_remove_front(1, &guard);
+        assert!(res.is_ok());
+
+        drop(guard);
+        let guard = epoch::pin();
+
+        let elem = queue.peek(&guard);
+        assert_eq!(elem, Some(&2));
+
+        drop(guard);
+        let guard = epoch::pin();
+
+        let res = queue.try_remove_front(2, &guard);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn concurrent_enqueue() {
+        let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
+        let mut handles = vec![];
+
+        for id in 0..2 {
+            let queue = queue.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..10000 {
+                    let guard = epoch::pin();
+
+                    queue.enqueue(id, id, &guard);
+
+                    drop(guard);
+                }
+            }));
         }
 
-        {
-            let guard = &epoch::pin();
-            let elem = queue.peek(guard);
-            assert_eq!(elem, Some(&1));
+        for handle in handles {
+            handle.join().unwrap();
         }
 
-        {
-            let guard = &epoch::pin();
-            let res = queue.try_remove_front(1, guard);
-            assert!(res.is_ok());
-        }
+        for _ in 0..20000 {
+            let guard = epoch::pin();
 
-        {
-            let guard = &epoch::pin();
-            let res = queue.try_remove_front(1, guard);
-            assert!(res.is_err());
+            let elem = queue.peek(&guard);
+            assert!(elem == Some(&0) || elem == Some(&1));
+
+            drop(guard);
         }
     }
 
     #[test]
-    fn single_threaded_2() {
-        const ID: usize = 0usize;
-        let queue = WaitFreeHelpQueue::<_, 1>::new();
+    fn concurrent_remove() {
+        let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
 
-        {
-            let guard = &epoch::pin();
-            queue.enqueue(ID, 1, guard);
+        for val in 0..10000 {
+            let guard = epoch::pin();
+            queue.enqueue(0, val, &guard);
+            drop(guard);
         }
 
-        {
-            let guard = &epoch::pin();
-            queue.enqueue(ID, 2, guard);
+        let mut handles = vec![];
+        for _ in 0..2 {
+            let queue = queue.clone();
+            handles.push(thread::spawn(move || {
+                let mut counter = 0;
+                for val in 0..10000 {
+                    let guard = epoch::pin();
+                    if let Ok(()) = queue.try_remove_front(val, &guard) {
+                        counter += 1;
+                    }
+
+                    drop(guard);
+                }
+                println!("counter: {}", counter);
+            }));
         }
 
-        {
-            let guard = &epoch::pin();
-            let elem = queue.peek(guard);
-            assert_eq!(elem, Some(&1));
+        for handle in handles {
+            handle.join().unwrap();
         }
 
-        {
-            let guard = &epoch::pin();
-
-            // Fail to enqueue element not on top
-            let res = queue.try_remove_front(2, guard);
-            assert!(res.is_err());
-        }
-
-        {
-            let guard = &epoch::pin();
-            let res = queue.try_remove_front(1, guard);
-            assert!(res.is_ok());
-        }
-
-        {
-            let guard = &epoch::pin();
-            let elem = queue.peek(guard);
-            assert_eq!(elem, Some(&2));
-        }
-
-        {
-            let guard = &epoch::pin();
-            let res = queue.try_remove_front(2, guard);
-            assert!(res.is_ok());
-        }
+        let guard = epoch::pin();
+        let elem = queue.peek(&guard);
+        assert!(elem.is_none());
     }
 }
