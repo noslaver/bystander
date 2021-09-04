@@ -63,7 +63,6 @@ impl std::ops::Deref for DoubleMarkNode {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-// #[repr(transparent)]
 struct DoubleMarkRef(Atomic<DoubleMarkNode>);
 
 impl DoubleMarkRef {
@@ -592,46 +591,102 @@ impl NormalizedLockFree for LinkedList {
 
 #[test]
 fn fast_path() {
-    let linked_list = WaitFreeLinkedList::<1>::new();
+    let list = WaitFreeLinkedList::<1>::new();
 
     // no elements yet
-    assert!(!linked_list.delete(1));
+    assert!(!list.delete(1));
 
     // insert `1`
-    assert!(linked_list.insert(1));
-    assert!(linked_list.find(1));
+    assert!(list.insert(1));
+    assert!(list.find(1));
     // can't insert `1` twice
-    assert!(!linked_list.insert(1));
-    assert!(linked_list.find(1));
+    assert!(!list.insert(1));
+    assert!(list.find(1));
 
     // insert `2`
-    assert!(linked_list.insert(2));
-    assert!(linked_list.find(2));
+    assert!(list.insert(2));
+    assert!(list.find(2));
 
     // remove `1`
-    assert!(linked_list.delete(1));
-    assert!(!linked_list.find(1));
+    assert!(list.delete(1));
+    assert!(!list.find(1));
 
     // remove `2`
-    assert!(linked_list.delete(2));
-    assert!(!linked_list.find(2));
+    assert!(list.delete(2));
+    assert!(!list.find(2));
 }
 
 #[test]
 fn dropping_one_element_list() {
-    let linked_list = WaitFreeLinkedList::<1>::new();
+    let list = WaitFreeLinkedList::<1>::new();
 
-    assert!(linked_list.insert(0));
-    assert!(linked_list.find(0));
+    assert!(list.insert(0));
+    assert!(list.find(0));
 }
 
 #[test]
 #[ignore]
 fn dropping_many_element_list() {
-    let linked_list = WaitFreeLinkedList::<1>::new();
+    let list = WaitFreeLinkedList::<1>::new();
 
     for i in 0..127 {
-        assert!(linked_list.insert(i));
-        assert!(linked_list.find(i));
+        assert!(list.insert(i));
+        assert!(list.find(i));
+    }
+}
+
+use std::sync::Arc;
+use std::thread;
+
+#[test]
+#[ignore]
+fn concurrent_delete() {
+    let list = Arc::new(WaitFreeLinkedList::<2>::new());
+
+    for val in 0..100 {
+        list.insert(val);
+    }
+
+    let mut handles = vec![];
+    for _ in 0..2 {
+        let list = list.clone();
+        handles.push(thread::spawn(move || {
+            let mut counter = 0;
+            for val in 0..100 {
+                if list.delete(val) {
+                    counter += 1;
+                }
+            }
+            println!("counter: {}", counter);
+        }));
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}
+
+#[test]
+#[ignore]
+fn concurrent_insert() {
+    const N: usize = 50;
+    let list = Arc::new(WaitFreeLinkedList::<N>::new());
+
+    let mut handles = vec![];
+    for _ in 0..N {
+        let list = list.clone();
+        handles.push(thread::spawn(move || {
+            let mut counter = 0;
+            for val in 0..1500 {
+                if list.insert(val) {
+                    counter += 1;
+                }
+            }
+            println!("counter: {}", counter);
+        }));
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
     }
 }

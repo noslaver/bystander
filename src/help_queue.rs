@@ -461,10 +461,11 @@ mod tests {
 
     #[test]
     fn concurrent_enqueue() {
-        let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
+        const N: usize = 32;
+        let queue = Arc::new(WaitFreeHelpQueue::<_, N>::new());
         let mut handles = vec![];
 
-        for id in 0..2 {
+        for id in 0..N {
             let queue = queue.clone();
             handles.push(thread::spawn(move || {
                 for _ in 0..10000 {
@@ -485,7 +486,11 @@ mod tests {
             let guard = epoch::pin();
 
             let elem = queue.peek(&guard);
-            assert!(elem == Some(&0) || elem == Some(&1));
+
+            assert!(elem.is_some());
+            let elem = *elem.unwrap();
+
+            assert!(elem < N);
 
             drop(guard);
         }
@@ -493,7 +498,8 @@ mod tests {
 
     #[test]
     fn concurrent_remove() {
-        let queue = Arc::new(WaitFreeHelpQueue::<_, 2>::new());
+        const N: usize = 32;
+        let queue = Arc::new(WaitFreeHelpQueue::<_, N>::new());
 
         for val in 0..10000 {
             let guard = epoch::pin();
@@ -502,7 +508,7 @@ mod tests {
         }
 
         let mut handles = vec![];
-        for _ in 0..2 {
+        for _ in 0..N {
             let queue = queue.clone();
             handles.push(thread::spawn(move || {
                 let mut counter = 0;
