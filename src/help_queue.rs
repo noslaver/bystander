@@ -482,7 +482,7 @@ mod tests {
             handle.join().unwrap();
         }
 
-        for _ in 0..20000 {
+        for _ in 0..(N * 10000) {
             let guard = epoch::pin();
 
             let elem = queue.peek(&guard);
@@ -494,7 +494,7 @@ mod tests {
 
             let guard = &epoch::pin();
 
-            let res = queue.try_remove_front(*elem.unwrap(), guard);
+            let res = queue.try_remove_front(elem, guard);
             assert!(res.is_ok());
         }
     }
