@@ -474,7 +474,7 @@ impl Drop for LinkedList {
             };
         }
 
-        unsafe { self.tail.clone().0.drop() };
+        // unsafe { self.tail.0.clone().drop() };
     }
 }
 
@@ -591,26 +591,47 @@ impl NormalizedLockFree for LinkedList {
 }
 
 #[test]
-fn it_almost_works() {
+fn fast_path() {
     let linked_list = WaitFreeLinkedList::<1>::new();
 
+    // no elements yet
     assert!(!linked_list.delete(1));
 
+    // insert `1`
     assert!(linked_list.insert(1));
     assert!(linked_list.find(1));
+    // can't insert `1` twice
     assert!(!linked_list.insert(1));
     assert!(linked_list.find(1));
+
+    // insert `2`
     assert!(linked_list.insert(2));
     assert!(linked_list.find(2));
 
+    // remove `1`
     assert!(linked_list.delete(1));
     assert!(!linked_list.find(1));
 
+    // remove `2`
     assert!(linked_list.delete(2));
     assert!(!linked_list.find(2));
+}
 
-    // for i in 3..127 {
-    //     assert!(linked_list.insert(i));
-    //     assert!(linked_list.find(i));
-    // }
+#[test]
+fn dropping_one_element_list() {
+    let linked_list = WaitFreeLinkedList::<1>::new();
+
+    assert!(linked_list.insert(0));
+    assert!(linked_list.find(0));
+}
+
+#[test]
+#[ignore]
+fn dropping_many_element_list() {
+    let linked_list = WaitFreeLinkedList::<1>::new();
+
+    for i in 0..127 {
+        assert!(linked_list.insert(i));
+        assert!(linked_list.find(i));
+    }
 }
