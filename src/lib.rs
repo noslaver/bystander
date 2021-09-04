@@ -50,7 +50,7 @@ struct CasByRcu<T> {
     version: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Atomic<T>(EpochAtomic<CasByRcu<T>>);
 
 pub trait VersionedCas {

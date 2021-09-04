@@ -41,7 +41,7 @@ pub enum InputOp {
     Find(usize),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 struct DoubleMarkNode {
     node: Node,
     mark: bool,
@@ -62,7 +62,7 @@ impl std::ops::Deref for DoubleMarkNode {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 // #[repr(transparent)]
 struct DoubleMarkRef(Atomic<DoubleMarkNode>);
 
@@ -216,7 +216,7 @@ impl VersionedCas for ListCasDescriptor {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Node {
     key: Option<usize>,
     next: DoubleMarkRef,
@@ -464,15 +464,17 @@ impl Drop for LinkedList {
             .unwrap()
             .next;
 
-        while !next.0.is_null(guard) {
+        loop {
             unsafe { curr.0.drop() };
             curr = next;
-            next = curr
-                .0
-                .with(|curr, _| curr.node.clone(), guard)
-                .unwrap()
-                .next;
+            next = if let Some(curr) = curr.0.with(|curr, _| curr.node.clone(), guard) {
+                curr.next
+            } else {
+                break;
+            };
         }
+
+        unsafe { self.tail.clone().0.drop() };
     }
 }
 
@@ -591,6 +593,8 @@ impl NormalizedLockFree for LinkedList {
 #[test]
 fn it_almost_works() {
     let linked_list = WaitFreeLinkedList::<1>::new();
+
+    assert!(!linked_list.delete(1));
 
     assert!(linked_list.insert(1));
     assert!(linked_list.find(1));
