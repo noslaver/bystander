@@ -196,13 +196,13 @@ pub trait NormalizedLockFree {
         op: &Self::Input,
         contention: &mut ContentionMeasure,
         guard: &'g Guard,
-    ) -> Result<Self::CommitDescriptor, Contention>;
+    ) -> Result<Option<Self::CommitDescriptor>, Contention>;
 
     fn wrap_up<'g>(
         &self,
         op: &Self::Input,
         executed: Result<(), usize>,
-        performed: &Self::CommitDescriptor,
+        performed: &Option<Self::CommitDescriptor>,
         contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<Option<Self::Output>, Contention>;
@@ -221,8 +221,8 @@ struct OperationRecordBox<LF: NormalizedLockFree> {
 
 enum OperationState<LF: NormalizedLockFree> {
     PreCas,
-    ExecuteCas(LF::CommitDescriptor),
-    PostCas(LF::CommitDescriptor, Result<(), usize>),
+    ExecuteCas(Option<LF::CommitDescriptor>),
+    PostCas(Option<LF::CommitDescriptor>, Result<(), usize>),
     Completed(LF::Output),
 }
 
@@ -301,21 +301,21 @@ impl From<Contention> for CasExecuteFailure {
 
 impl<LF: NormalizedLockFree, const N: usize> WaitFreeSimulator<LF, N>
 where
-    for<'a> &'a LF::CommitDescriptor: IntoIterator<Item = &'a dyn VersionedCas>,
+    LF::CommitDescriptor: VersionedCas,
 {
     fn cas_execute<'g>(
         &self,
-        descriptors: &LF::CommitDescriptor,
+        descriptor: &Option<LF::CommitDescriptor>,
         contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<(), CasExecuteFailure> {
-        for (i, cas) in descriptors.into_iter().enumerate() {
+        if let Some(cas) = descriptor {
             match cas.state() {
                 CasState::Success => {
                     cas.clear_bit(guard);
                 }
                 CasState::Failure => {
-                    return Err(CasExecuteFailure::CasFailed(i));
+                    return Err(CasExecuteFailure::CasFailed(0));
                 }
                 CasState::Pending => {
                     cas.execute(contention, guard)?;
@@ -326,7 +326,7 @@ where
                     }
                     if cas.state() != CasState::Success {
                         cas.set_state(CasState::Failure);
-                        return Err(CasExecuteFailure::CasFailed(i));
+                        return Err(CasExecuteFailure::CasFailed(0));
                     }
                 }
             }

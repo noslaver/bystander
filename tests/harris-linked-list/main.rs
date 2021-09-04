@@ -409,14 +409,14 @@ impl NormalizedLockFree for LinkedList {
     type Input = InputOp;
     type Output = bool;
 
-    type CommitDescriptor = Option<ListCasDescriptor>;
+    type CommitDescriptor = ListCasDescriptor;
 
     fn generator<'g>(
         &self,
         op: &Self::Input,
         _contention: &mut ContentionMeasure,
         guard: &'g Guard,
-    ) -> Result<Self::CommitDescriptor, Contention> {
+    ) -> Result<Option<Self::CommitDescriptor>, Contention> {
         match *op {
             InputOp::Insert(key) => {
                 let (pred, curr) = self.search(Some(key), guard)?;
@@ -466,7 +466,7 @@ impl NormalizedLockFree for LinkedList {
         &self,
         op: &Self::Input,
         executed: Result<(), usize>,
-        performed: &Self::CommitDescriptor,
+        performed: &Option<Self::CommitDescriptor>,
         _contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<Option<Self::Output>, Contention> {
@@ -508,7 +508,7 @@ impl NormalizedLockFree for LinkedList {
 
 #[test]
 fn nothing_works() {
-    let _linked_list = WaitFreeLinkedList::<1>::new();
+    let linked_list = WaitFreeLinkedList::<1>::new();
 
-    // linked_list.run();
+    linked_list.insert(1);
 }
