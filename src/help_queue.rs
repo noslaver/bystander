@@ -487,7 +487,10 @@ mod tests {
             let elem = &queue.peek(guard);
             assert!(*elem == Some(&0) || *elem == Some(&1));
 
-            drop(guard);
+            let guard = &epoch::pin();
+
+            let res = queue.try_remove_front(*elem.unwrap(), guard);
+            assert!(res.is_ok());
         }
     }
 
