@@ -113,7 +113,7 @@ impl DoubleMarkRef {
     }
 }
 
-pub struct ListCasDescriptor {
+struct ListCasDescriptor {
     holder: DoubleMarkRef,
     old_ref: *const Node, // TODO
     new_ref: Node,
@@ -121,6 +121,20 @@ pub struct ListCasDescriptor {
     new_mark: bool,
     old_version: u64,
     state: AtomicU8, // This is actually CasState
+}
+
+#[derive(Clone)]
+pub struct ListCommitDesc(Option<ListCasDescriptor>);
+
+impl<'a> IntoIterator for &'a ListCommitDesc {
+    type Item = &'a dyn VersionedCas;
+    type IntoIter = <Option<&'a dyn VersionedCas> as IntoIterator>::IntoIter;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0
+            .as_ref()
+            .map(|desc| desc as &dyn VersionedCas)
+            .into_iter()
+    }
 }
 
 impl Clone for ListCasDescriptor {
@@ -481,14 +495,14 @@ impl NormalizedLockFree for LinkedList {
     type Input = InputOp;
     type Output = bool;
 
-    type CommitDescriptor = ListCasDescriptor;
+    type CommitDescriptor = ListCommitDesc;
 
     fn generator<'g>(
         &self,
         op: &Self::Input,
         _contention: &mut ContentionMeasure,
         guard: &'g Guard,
-    ) -> Result<Option<Self::CommitDescriptor>, Contention> {
+    ) -> Result<Self::CommitDescriptor, Contention> {
         match *op {
             InputOp::Insert(key) => {
                 let (pred, curr) = self.search(Some(key), guard)?;
@@ -501,20 +515,20 @@ impl NormalizedLockFree for LinkedList {
                     .unwrap()
                     && curr.key == Some(key)
                 {
-                    return Ok(None);
+                    return Ok(ListCommitDesc(None));
                 }
 
                 let mut new = Node::new(key);
                 new.next = DoubleMarkRef(unsafe { Atomic::from_raw(curr as *const _) });
 
-                Ok(Some(ListCasDescriptor::new(
+                Ok(ListCommitDesc(Some(ListCasDescriptor::new(
                     pred.next.clone(),
                     curr as *const _ as *const _,
                     new,
                     false,
                     false,
                     pred.next.get_version(guard),
-                )))
+                ))))
             }
             InputOp::Delete(key) => {
                 let (_pred, curr) = self.search(Some(key), guard)?;
@@ -526,10 +540,10 @@ impl NormalizedLockFree for LinkedList {
                     .unwrap()
                     || curr.key != Some(key)
                 {
-                    return Ok(None);
+                    return Ok(ListCommitDesc(None));
                 }
 
-                Ok(Some(ListCasDescriptor::new(
+                Ok(ListCommitDesc(Some(ListCasDescriptor::new(
                     curr.next.clone(),
                     curr.next.0.as_raw() as *const _,
                     curr.next
@@ -539,9 +553,9 @@ impl NormalizedLockFree for LinkedList {
                     false,
                     true,
                     curr.next.get_version(guard),
-                )))
+                ))))
             }
-            InputOp::Find(_key) => Ok(None),
+            InputOp::Find(_key) => Ok(ListCommitDesc(None)),
         }
     }
 
@@ -549,13 +563,13 @@ impl NormalizedLockFree for LinkedList {
         &self,
         op: &Self::Input,
         executed: Result<(), usize>,
-        performed: &Option<Self::CommitDescriptor>,
+        performed: &Self::CommitDescriptor,
         _contention: &mut ContentionMeasure,
         guard: &'g Guard,
     ) -> Result<Option<Self::Output>, Contention> {
         match *op {
             InputOp::Delete(_key) | InputOp::Insert(_key) => {
-                if performed.is_none() {
+                if performed.0.is_none() {
                     // Operation failed
                     return Ok(Some(false));
                 }
